@@ -14,6 +14,7 @@ from bot.services.intent_parser import parse_user_intent
 from bot.keyboards.inline import get_entry_confirm_keyboard, get_tasks_keyboard
 from bot.handlers.states import GarageEntryState
 from bot.services.draft_store import save_draft
+from bot.services.assistant import answer_query
 
 logger = logging.getLogger(__name__)
 
@@ -190,11 +191,50 @@ async def handle_voice_entry(message: Message, bot: Bot, state: FSMContext):
                 parse_mode="Markdown"
             )
 
-        # --- Ветка 4: Не удалось распознать ---
+        # --- Ветка 4: Ответ ассистента (вопросы, советы, поиск в интернете) ---
+        elif intent == "ask_assistant":
+            needs_web = bool(data.get("needs_web_search"))
+            search_query = data.get("search_query")
+            user_query = data.get("user_query") or transcript
+
+            wait_text = "🔍 <i>Ищу информацию в интернете...</i>" if needs_web else "🤔 <i>Думаю над ответом...</i>"
+            assistant_wait_msg = await message.answer(wait_text)
+            try:
+                answer = await answer_query(user_query=user_query, needs_web=needs_web, search_query=search_query)
+                try:
+                    await assistant_wait_msg.delete()
+                except Exception:
+                    pass
+                await message.answer(answer, parse_mode=None)
+            except Exception as err:
+                logger.error(f"Ошибка при формировании ответа ассистента: {err}", exc_info=True)
+                try:
+                    await assistant_wait_msg.delete()
+                except Exception:
+                    pass
+                await message.answer("⚠️ Не удалось получить ответ ассистента. Попробуй переформулировать вопрос.")
+
+        # --- Ветка 5: Не удалось распознать (шум) ---
         else:
-            await message.answer(
-                f"Не удалось точно понять данные. Распознанный текст: «{transcript}». Попробуй сказать еще раз."
-            )
+            if transcript and len(transcript.strip()) > 3:
+                assistant_wait_msg = await message.answer("🤔 <i>Секунду...</i>")
+                try:
+                    answer = await answer_query(user_query=transcript, needs_web=False)
+                    try:
+                        await assistant_wait_msg.delete()
+                    except Exception:
+                        pass
+                    await message.answer(answer, parse_mode=None)
+                except Exception:
+                    try:
+                        await assistant_wait_msg.delete()
+                    except Exception:
+                        pass
+                    await message.answer(
+                        f"Не удалось разобрать голосовое: «{transcript}». Попробуй сказать еще раз."
+                    )
+            else:
+                await message.answer("🔇 Не удалось расслышать слова. Попробуй сказать еще раз.")
 
     except Exception as e:
         logger.error(f"Ошибка при обработке голосового сообщения: {e}", exc_info=True)

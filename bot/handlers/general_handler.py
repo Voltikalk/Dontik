@@ -1,11 +1,17 @@
 import logging
-from aiogram import Router, html
+from aiogram import Router, html, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message
+from aiogram.fsm.context import FSMContext
 
 from bot.database.db import get_session
 from bot.database import crud
-from bot.keyboards.inline import get_tasks_keyboard
+from bot.keyboards.inline import get_tasks_keyboard, get_entry_confirm_keyboard
+from bot.services.intent_parser import parse_user_intent
+from bot.services.assistant import answer_query
+from bot.services.draft_store import save_draft
+from bot.handlers.voice_handler import format_markdown_card
+from bot.handlers.states import GarageEntryState
 
 logger = logging.getLogger(__name__)
 
@@ -23,16 +29,18 @@ async def cmd_start(message: Message):
 
     text = (
         f"👋 <b>Привет, {safe_name}!</b>\n\n"
-        "Я твой личный ассистент по автомобилю, гаражу и <b>задачник</b>.\n\n"
-        "🎙 <b>Просто зажми микрофон и скажи что угодно своими словами:</b>\n"
-        "• <i>«Заправил 35 литров на две тысячи, пробег 150 000»</i>\n"
-        "• <i>«Поменял масло и фильтры, пробег 152 000»</i>\n"
-        "• <i>«Положил домкрат под верстак»</i> или <i>«Где лежит домкрат?»</i>\n"
-        "• <i>«Запиши на завтра съездить на дачу, купить грабли»</i>\n"
-        "• <i>«Какие у меня дела на завтра?»</i>\n\n"
-        "📊 <b>Команды:</b>\n"
-        "/stats — сводка по заправкам и ТО\n"
-        "/tasks — список актуальных задач и напоминаний"
+        "Я твой личный универсальный помощник, задачник и авто-гаражный ассистент.\n\n"
+        "🎙 <b>Ты можешь писать текстом или просто зажать микрофон:</b>\n"
+        "• 📝 <b>Задачи:</b> <i>«Запиши на завтра съездить на дачу, купить грабли»</i>\n"
+        "• 🌐 <b>Поиск в сети:</b> <i>«Какая погода завтра в Самаре?»</i> или <i>«Курс доллара»</i>\n"
+        "• 💡 <b>Советы и вопросы:</b> <i>«Как прокачать тормоза на Ниве?»</i>\n"
+        "• ⛽ <b>Заправки:</b> <i>«Заправил 35 литров на две тысячи, пробег 150 000»</i>\n"
+        "• 📦 <b>Вещи:</b> <i>«Положил домкрат под верстак»</i> / <i>«Где лежит домкрат?»</i>\n\n"
+        "📌 <b>Быстрые команды:</b>\n"
+        "/tasks — список актуальных задач с кнопками выполнения\n"
+        "/stats — сводка по заправкам и ремонтам\n"
+        "/items — каталог вещей в гараже\n"
+        "/help — подробная справка"
     )
     await message.answer(text)
 
@@ -140,13 +148,21 @@ async def cmd_help(message: Message):
     Справочная информация и примеры использования.
     """
     text = (
-        "💡 <b>Как пользоваться ботом «Авто-Гараж Ассистент»:</b>\n\n"
-        "🎙 <b>Голосовое управление:</b>\n"
-        "Зажмите кнопку микрофона и говорите своими словами:\n\n"
+        "💡 <b>Как пользоваться ботом «Авто-Гараж и Персональный Ассистент»:</b>\n\n"
+        "🎙 <b>Голосовое и текстовое управление:</b>\n"
+        "Вы можете как зажать кнопку микрофона, так и просто написать текст в чат:\n\n"
         "📝 <b>Задачи и напоминания:</b>\n"
         "• <i>«Запиши на завтра съездить на работу к Николаю Викторовичу»</i>\n"
         "• <i>«Напомни в субботу поменять масло»</i>\n"
-        "• <i>«Какие у меня дела?»</i> (выведет список активных задач)\n\n"
+        "• <i>«Какие у меня дела?»</i> (выведет список задач с кнопками завершения)\n\n"
+        "🌐 <b>Поиск в интернете (подключается автоматически):</b>\n"
+        "• <i>«Какая погода завтра в Москве?»</i>\n"
+        "• <i>«Найди актуальный курс доллара и евро»</i>\n"
+        "• <i>«Сколько стоит резина 205/55 R16?»</i>\n\n"
+        "💡 <b>Вопросы и экспертные советы:</b>\n"
+        "• <i>«Как прокачать тормоза на классике?»</i>\n"
+        "• <i>«Сколько варить яйца всмятку?»</i>\n"
+        "• Любые другие вопросы по жизни, технике и быту!\n\n"
         "⛽ <b>Заправки автомобиля:</b>\n"
         "• <i>«Заправил сорок литров на 2500 рублей, пробег 155 000, Газпромнефть»</i>\n\n"
         "🔧 <b>Сервис и ремонты:</b>\n"
@@ -161,5 +177,119 @@ async def cmd_help(message: Message):
         "/start — перезапуск и приветствие"
     )
     await message.answer(text)
+
+
+@router.message(F.text & ~F.text.startswith("/"))
+async def handle_text_message(message: Message, state: FSMContext):
+    """
+    Универсальный обработчик обычных текстовых сообщений.
+    Позволяет вводить задачи, вести учет расходов и задавать любые вопросы
+    текстом точно так же, как и голосом.
+    """
+    user_id = message.from_user.id
+    raw_text = message.text.strip()
+    if not raw_text:
+        return
+
+    lowered = raw_text.lower()
+
+    # 1. Быстрые команды на естественном языке
+    if lowered in {"меню", "start", "старт"}:
+        await cmd_start(message)
+        return
+    elif lowered in {"задачи", "дела", "список задач", "список дел", "что сделать", "планы"}:
+        await cmd_tasks(message)
+        return
+    elif lowered in {"статистика", "статы", "расходы", "заправки"}:
+        await cmd_stats(message)
+        return
+    elif lowered in {"вещи", "гараж", "инвентарь", "где что лежит"}:
+        await cmd_items(message)
+        return
+    elif lowered in {"помощь", "справка", "help", "инструкция"}:
+        await cmd_help(message)
+        return
+
+    # 2. Интеллектуальный разбор интента через Groq LLM
+    parsed = await parse_user_intent(raw_text)
+    intent = parsed.get("intent", "unknown")
+    data = parsed.get("data", {})
+
+    # Ветка: Поиск вещи
+    if intent == "item_find":
+        query = data.get("search_query") or raw_text
+        async with get_session() as session:
+            found = await crud.search_item_locations(session, user_id=user_id, query=query)
+        if found:
+            results = []
+            for it in found:
+                date_str = it.updated_at.strftime("%d.%m.%Y")
+                results.append(f"🔍 Найдено: <b>{html.quote(it.item_name)}</b> лежит в <code>{html.quote(it.location)}</code> (обновлено {date_str})")
+            await message.answer("\n\n".join(results))
+        else:
+            await message.answer("Ничего похожего в гараже не нашел.")
+
+    # Ветка: Список задач
+    elif intent == "task_list":
+        await cmd_tasks(message)
+
+    # Ветка: Заправка, сервис, вещь, задача (карточка подтверждения)
+    elif intent in ["fuel", "service", "item_save", "task_save"]:
+        draft_id = save_draft(user_id=user_id, intent=intent, data=data)
+        await state.set_state(GarageEntryState.waiting_confirmation)
+        await state.update_data(
+            intent=intent,
+            payload=data,
+            transcript=raw_text,
+            draft_id=draft_id,
+            **data
+        )
+        card_text = format_markdown_card(intent=intent, data=data)
+        await message.answer(
+            card_text,
+            reply_markup=get_entry_confirm_keyboard(draft_id=draft_id),
+            parse_mode="Markdown"
+        )
+
+    # Ветка: Универсальный ассистент и веб-поиск
+    elif intent == "ask_assistant":
+        needs_web = bool(data.get("needs_web_search"))
+        search_query = data.get("search_query")
+        user_query = data.get("user_query") or raw_text
+
+        status_text = "🔍 <i>Ищу актуальную информацию в интернете...</i>" if needs_web else "🤔 <i>Думаю над ответом...</i>"
+        status_msg = await message.answer(status_text)
+        try:
+            answer = await answer_query(user_query=user_query, needs_web=needs_web, search_query=search_query)
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+            await message.answer(answer, parse_mode=None)
+        except Exception as e:
+            logger.error(f"Ошибка ассистента при текстовом запросе: {e}", exc_info=True)
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+            await message.answer("⚠️ Не удалось получить ответ. Попробуй переформулировать вопрос.")
+
+    # Ветка: Общий диалог / неопределенный текст
+    else:
+        status_msg = await message.answer("🤔 <i>Секунду...</i>")
+        try:
+            answer = await answer_query(user_query=raw_text, needs_web=False)
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+            await message.answer(answer, parse_mode=None)
+        except Exception:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+            await message.answer("Я не совсем понял, что требуется сделать. Напиши вопрос подробнее или нажми /help.")
+
 
 
