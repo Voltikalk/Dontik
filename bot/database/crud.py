@@ -3,7 +3,8 @@ from typing import Optional, List, Dict, Any
 from sqlalchemy import select, desc, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.database.models import User, FuelLog, ServiceLog, ItemLocation
+from bot.database.models import User, FuelLog, ServiceLog, ItemLocation, Task
+
 
 
 # --- Пользователи ---
@@ -255,3 +256,57 @@ async def delete_item_location(
     )
     result = await session.execute(stmt)
     return result.rowcount > 0
+
+
+# --- Задачник и напоминания (Task) ---
+
+async def add_task(
+    session: AsyncSession,
+    user_id: int,
+    title: str,
+    due_date: Optional[str] = None
+) -> Task:
+    """Добавляет задачу или напоминание в список дел."""
+    task = Task(
+        user_id=user_id,
+        title=title.strip(),
+        due_date=due_date.strip() if due_date else None,
+        is_completed=False,
+        created_at=datetime.now()
+    )
+    session.add(task)
+    await session.flush()
+    return task
+
+
+async def get_active_tasks(
+    session: AsyncSession,
+    user_id: int,
+    limit: int = 20
+) -> List[Task]:
+    """Возвращает список актуальных (невыполненных) задач пользователя."""
+    stmt = (
+        select(Task)
+        .where(Task.user_id == user_id, Task.is_completed == False)
+        .order_by(desc(Task.created_at))
+        .limit(limit)
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def complete_task(
+    session: AsyncSession,
+    user_id: int,
+    task_id: int
+) -> bool:
+    """Отмечает задачу как выполненную."""
+    stmt = select(Task).where(Task.user_id == user_id, Task.id == task_id)
+    result = await session.execute(stmt)
+    task = result.scalar_one_or_none()
+    if task:
+        task.is_completed = True
+        await session.flush()
+        return True
+    return False
+

@@ -72,6 +72,18 @@ def format_markdown_card(intent: str, data: dict) -> str:
             "_Записать в каталог гаража?_"
         )
 
+    elif intent == "task_save":
+        title = data.get("title") or "Задача"
+        due_date = data.get("due_date")
+        due_str = f"• *Срок:* {due_date}\n" if due_date else ""
+
+        return (
+            "📝 *Новая задача / список дел:*\n\n"
+            f"• *Дело:* {title}\n"
+            f"{due_str}\n"
+            "_Добавить это в твой список задач?_"
+        )
+
     return "ℹ️ *Распознаны данные:*\n" + str(data)
 
 
@@ -140,8 +152,22 @@ async def handle_voice_entry(message: Message, bot: Bot, state: FSMContext):
             else:
                 await message.answer("Ничего похожего в гараже не нашел")
 
-        # --- Ветка 2: Заправка, сервис, сохранение вещи ---
-        elif intent in ["fuel", "service", "item_save"]:
+        # --- Ветка 2: Список задач ---
+        elif intent == "task_list":
+            async with get_session() as session:
+                tasks = await crud.get_active_tasks(session, user_id=user_id)
+
+            if tasks:
+                lines = ["📋 *Твой актуальный список дел и задач:*\n"]
+                for idx, t in enumerate(tasks, 1):
+                    due = f" _(срок: {t.due_date})_" if t.due_date else ""
+                    lines.append(f"{idx}. {t.title}{due}")
+                await message.answer("\n".join(lines), parse_mode="Markdown")
+            else:
+                await message.answer("🎉 У тебя нет активных задач! Все дела выполнены или еще не записаны.")
+
+        # --- Ветка 3: Заправка, сервис, сохранение вещи, задача ---
+        elif intent in ["fuel", "service", "item_save", "task_save"]:
             # Сохранение спарсенных данных в FSM
             await state.set_state(GarageEntryState.waiting_confirmation)
             await state.update_data(intent=intent, data=data, transcript=transcript)
@@ -153,7 +179,7 @@ async def handle_voice_entry(message: Message, bot: Bot, state: FSMContext):
                 parse_mode="Markdown"
             )
 
-        # --- Ветка 3: Не удалось распознать ---
+        # --- Ветка 4: Не удалось распознать ---
         else:
             await message.answer(
                 f"Не удалось точно понять данные. Распознанный текст: «{transcript}». Попробуй сказать еще раз."

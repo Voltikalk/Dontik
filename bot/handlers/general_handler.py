@@ -22,13 +22,16 @@ async def cmd_start(message: Message):
 
     text = (
         f"👋 <b>Привет, {safe_name}!</b>\n\n"
-        "Я твой голосовой ассистент по автомобилю и гаражу.\n\n"
-        "🎙 <b>Просто зажми микрофон и скажи:</b>\n"
+        "Я твой личный ассистент по автомобилю, гаражу и <b>задачник</b>.\n\n"
+        "🎙 <b>Просто зажми микрофон и скажи что угодно своими словами:</b>\n"
         "• <i>«Заправил 35 литров на две тысячи, пробег 150 000»</i>\n"
-        "• <i>«Поменял масло и фильтры, пробег 152 000, отдано 4 500 рублей»</i>\n"
-        "• <i>«Положил домкрат под верстак»</i>\n"
-        "• <i>«Где лежит домкрат?»</i>\n\n"
-        "📊 Команда /stats покажет сводку по последним записям."
+        "• <i>«Поменял масло и фильтры, пробег 152 000»</i>\n"
+        "• <i>«Положил домкрат под верстак»</i> или <i>«Где лежит домкрат?»</i>\n"
+        "• <i>«Запиши на завтра съездить на дачу, купить грабли»</i>\n"
+        "• <i>«Какие у меня дела на завтра?»</i>\n\n"
+        "📊 <b>Команды:</b>\n"
+        "/stats — сводка по заправкам и ТО\n"
+        "/tasks — список актуальных задач и напоминаний"
     )
     await message.answer(text)
 
@@ -74,3 +77,31 @@ async def cmd_stats(message: Message):
         lines.append("🔧 <b>Последнее ТО / ремонт:</b> <i>записей пока нет</i>\n")
 
     await message.answer("\n".join(lines))
+
+
+@router.message(Command("tasks", "todo"))
+async def cmd_tasks(message: Message):
+    """
+    Обработчик команды /tasks и /todo.
+    Выводит список активных задач пользователя.
+    """
+    user_id = message.from_user.id
+
+    async with get_session() as session:
+        tasks = await crud.get_active_tasks(session, user_id=user_id)
+
+    if not tasks:
+        await message.answer(
+            "🎉 <b>Список задач пуст!</b>\n\n"
+            "Чтобы добавить дело или покупку, просто скажите голосовым сообщением, например:\n"
+            "<i>«Запиши на завтра съездить на дачу, купить грабли»</i>"
+        )
+        return
+
+    lines = ["📋 <b>Твой актуальный список дел и задач:</b>\n"]
+    for idx, t in enumerate(tasks, 1):
+        due_str = f" <i>(срок: {html.quote(t.due_date)})</i>" if t.due_date else ""
+        lines.append(f"{idx}. <b>{html.quote(t.title)}</b>{due_str}")
+
+    await message.answer("\n".join(lines))
+

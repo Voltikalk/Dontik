@@ -1,6 +1,6 @@
 """Модуль базы данных: модели, подключение и CRUD"""
 from .db import init_db, get_session, async_session_factory, Base
-from .models import User, FuelLog, ServiceLog, ItemLocation
+from .models import User, FuelLog, ServiceLog, ItemLocation, Task
 
 __all__ = [
     "init_db",
@@ -11,4 +11,5 @@ __all__ = [
     "FuelLog",
     "ServiceLog",
     "ItemLocation",
+    "Task",
 ]

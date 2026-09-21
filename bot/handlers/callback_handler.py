@@ -89,6 +89,19 @@ async def process_confirm_entry(callback: CallbackQuery, state: FSMContext):
                 location=location
             )
 
+        elif intent == "task_save":
+            title = str(data.get("title") or "Задача")
+            due_date = data.get("due_date")
+
+            await crud.add_task(
+                session=session,
+                user_id=user_id,
+                title=title,
+                due_date=due_date
+            )
+            due_str = f" (срок: {due_date})" if due_date else ""
+            result_text = f"✅ Задача «{title}»{due_str} записана в список дел!"
+
     # Очищаем FSM состояние
     await state.clear()
 

@@ -22,6 +22,7 @@ class User(Base):
     fuel_logs: Mapped[List["FuelLog"]] = relationship("FuelLog", back_populates="user", cascade="all, delete-orphan")
     service_logs: Mapped[List["ServiceLog"]] = relationship("ServiceLog", back_populates="user", cascade="all, delete-orphan")
     item_locations: Mapped[List["ItemLocation"]] = relationship("ItemLocation", back_populates="user", cascade="all, delete-orphan")
+    tasks: Mapped[List["Task"]] = relationship("Task", back_populates="user", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:
         return f"<User(telegram_id={self.telegram_id}, full_name='{self.full_name}', is_admin={self.is_admin})>"
@@ -80,3 +81,22 @@ class ItemLocation(Base):
 
     def __repr__(self) -> str:
         return f"<ItemLocation(id={self.id}, item_name='{self.item_name}', location='{self.location}')>"
+
+
+class Task(Base):
+    """Модель задач, напоминаний и списка дел/покупок."""
+    __tablename__ = "tasks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    due_date: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    is_completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), nullable=False)
+
+    # Relationship
+    user: Mapped["User"] = relationship("User", back_populates="tasks")
+
+    def __repr__(self) -> str:
+        return f"<Task(id={self.id}, title='{self.title[:30]}', due_date='{self.due_date}', is_completed={self.is_completed})>"
+
