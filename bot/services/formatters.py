@@ -568,30 +568,30 @@ def split_telegram_chunks(text: str, max_chunk_size: int = 3800) -> list[str]:
 async def send_formatted_message(message: Message, text: str, reply_markup=None):
     """
     Отправляет пользователю сообщение с красивой разметкой и формулами.
-    - Конвертирует Markdown и LaTeX в Telegram HTML.
-    - Автоматически разбивает на сообщения, если превышен лимит 4096 символов.
-    - В случае редких ошибок парсинга Telegram плавно откатывается к чистому тексту.
+    - Разбивает исходный текст на части с сохранением структуры строк и абзацев ДО конвертации в HTML.
+    - Это гарантирует, что теги <blockquote>, <b>, <pre> никогда не окажутся разорванными между двумя сообщениями.
+    - Отключает предпросмотр ссылок (link previews).
     """
     if not text:
         return
 
-    html_content = md_to_telegram_html(text)
-    chunks = split_telegram_chunks(html_content)
+    # Разбиваем исходный текст с запасом по размеру (3200 символов), чтобы после HTML-тегов не превысить 4096
+    raw_chunks = split_telegram_chunks(text, max_chunk_size=3200)
 
-    for i, chunk in enumerate(chunks):
-        is_last = (i == len(chunks) - 1)
+    for i, raw_chunk in enumerate(raw_chunks):
+        is_last = (i == len(raw_chunks) - 1)
         kb = reply_markup if is_last else None
+        html_chunk = md_to_telegram_html(raw_chunk)
+
         try:
             await message.answer(
-                chunk,
+                html_chunk,
                 parse_mode=ParseMode.HTML,
                 reply_markup=kb,
                 link_preview_options=LinkPreviewOptions(is_disabled=True)
             )
         except Exception as e:
             logger.warning(f"Ошибка отправки сообщения в формате HTML: {e}. Отправка в plain text...")
-            raw_chunks = split_telegram_chunks(text)
-            raw_chunk = raw_chunks[i] if i < len(raw_chunks) else text
             await message.answer(
                 raw_chunk,
                 parse_mode=None,
