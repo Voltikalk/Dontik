@@ -114,7 +114,7 @@ async def handle_document_message(message: Message, bot: Bot):
             return
 
         async with get_session() as session:
-            history = await crud.get_recent_chat_history(session, user_id=user_id, limit=8)
+            history = await crud.get_recent_chat_history(session, user_id=user_id, limit=3)
 
         caption = (message.caption or "").strip()
         if caption:

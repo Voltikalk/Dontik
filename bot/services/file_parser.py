@@ -6,7 +6,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-MAX_CHARS_LIMIT = 25000  # Максимальное количество символов из одного документа для LLM
+MAX_CHARS_LIMIT = 5500  # Максимальное количество символов для надежного соблюдения лимитов Groq ITPM (7000 токенов/мин)
 
 
 import io
@@ -200,8 +200,8 @@ def parse_excel(file_path: str, max_chars: int = MAX_CHARS_LIMIT) -> str:
                 continue
 
             row_count += 1
-            if row_count > 150:
-                lines.append(f"... [Лист «{sheet_name}» содержит более 150 строк, показаны первые 150]")
+            if row_count > 60:
+                lines.append(f"... [Лист «{sheet_name}» содержит более 60 строк, показаны первые 60. Вы можете запросить конкретную позицию]")
                 break
 
             vals = [str(v).strip().replace("\n", " ") if v is not None else "" for v in row]
@@ -214,7 +214,7 @@ def parse_excel(file_path: str, max_chars: int = MAX_CHARS_LIMIT) -> str:
                 lines.append(f"| {row_str} |")
                 current_len += len(row_str) + 4
                 if current_len >= max_chars:
-                    lines.append("... [таблица усечена по лимиту объема]")
+                    lines.append("... [таблица усечена по лимиту объема для нейросети]")
                     wb.close()
                     return "\n".join(lines)
 

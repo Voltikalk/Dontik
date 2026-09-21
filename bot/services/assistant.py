@@ -114,7 +114,32 @@ async def answer_query(
             if content.strip():
                 return content.strip()
         except Exception as e:
+            err_str = str(e)
             logger.warning(f"Модель {model_name} вернула ошибку при ответе ассистента: {e}")
+
+            # Если превышен лимит токенов (413 / Request too large / ITPM)
+            if any(term in err_str.lower() for term in ["413", "too large", "rate_limit_exceeded", "limit 7000", "itpm"]):
+                logger.info("Аварийное сжатие контекста запроса для обхода лимита токенов Groq...")
+                short_prompt = prompt_content
+                if len(short_prompt) > 3500:
+                    short_prompt = short_prompt[:3500] + "\n\n... [данные сокращены по лимиту нейросети]"
+                compressed_messages = [
+                    {"role": "system", "content": ASSISTANT_SYSTEM_PROMPT},
+                    {"role": "user", "content": short_prompt}
+                ]
+                try:
+                    retry_resp = await client.chat.completions.create(
+                        model=model_name,
+                        messages=compressed_messages,
+                        temperature=0.4,
+                        max_tokens=1500
+                    )
+                    retry_content = retry_resp.choices[0].message.content or ""
+                    if retry_content.strip():
+                        return retry_content.strip()
+                except Exception as retry_e:
+                    logger.warning(f"Повторный сжатый запрос для {model_name} также не удался: {retry_e}")
+
             continue
 
     return "Прости, не удалось получить ответ от нейросети прямо сейчас. Попробуй задать вопрос чуть позже."
