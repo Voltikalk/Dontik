@@ -134,118 +134,295 @@ def format_service_history(logs: List[ServiceLog]) -> str:
         return "🔧 История обслуживания и ремонтов пока пуста."
 
     lines = ["🔧 <b>Последние записи ТО и сервиса:</b>\n"]
-    for it in logs:
-        date_str = it.date.strftime("%d.%m.%Y")
-        cost_str = f" — <code>{it.cost:,.0f} ₽</code>" if it.cost else ""
-        lines.append(
-            f"• <b>{date_str}</b> | <code>{it.odometer:,} км</code>: "
-            f"<b>{html.quote(it.title)}</b>{cost_str}".replace(",", " ")
-        )
-    return "\n".join(lines)
+   # --- Словари символов Unicode для степеней и индексов ---
+SUPERSCRIPTS = {
+    '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴',
+    '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹',
+    '+': '⁺', '-': '⁻', '=': '⁼', '(': '⁽', ')': '⁾',
+    'n': 'ⁿ', 'i': 'ⁱ', 'x': 'ˣ', 'y': 'ʸ', 'a': 'ᵃ', 'b': 'ᵇ'
+}
+
+SUBSCRIPTS = {
+    '0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄',
+    '5': '₅', '6': '₆', '7': '₇', '8': '₈', '9': '₉',
+    '+': '₊', '-': '₋', '=': '₌', '(': '₍', ')': '₎',
+    ',': ',', ';': ';',
+    'a': 'ₐ', 'e': 'ₑ', 'h': 'ₕ', 'i': 'ᵢ', 'j': 'ⱼ',
+    'k': 'ₖ', 'l': 'ₗ', 'm': 'ₘ', 'n': 'ₙ', 'o': 'ₒ',
+    'p': 'ₚ', 'r': 'ᵣ', 's': 'ₛ', 't': 'ₜ', 'u': 'ᵤ',
+    'v': 'ᵥ', 'x': 'ₓ'
+}
+
+LATEX_SYMBOLS = [
+    (r'\\pm', '±'),
+    (r'\\mp', '∓'),
+    (r'\\approx', '≈'),
+    (r'\\sim', '~'),
+    (r'\\neq', '≠'),
+    (r'\\ne', '≠'),
+    (r'\\leq', '≤'),
+    (r'\\le', '≤'),
+    (r'\\geq', '≥'),
+    (r'\\ge', '≥'),
+    (r'\\times', '×'),
+    (r'\\cdot', '·'),
+    (r'\\div', '÷'),
+    (r'\\degree', '°'),
+    (r'\\circ', '°'),
+    (r'\\infty', '∞'),
+    (r'\\in', '∈'),
+    (r'\\notin', '∉'),
+    (r'\\subset', '⊂'),
+    (r'\\subseteq', '⊆'),
+    (r'\\cup', '∪'),
+    (r'\\cap', '∩'),
+    (r'\\emptyset', '∅'),
+    (r'\\forall', '∀'),
+    (r'\\exists', '∃'),
+    (r'\\to', '→'),
+    (r'\\rightarrow', '→'),
+    (r'\\implies', '⇒'),
+    (r'\\Rightarrow', '⇒'),
+    (r'\\iff', '⇔'),
+    (r'\\Leftrightarrow', '⇔'),
+    (r'\\alpha', 'α'),
+    (r'\\beta', 'β'),
+    (r'\\gamma', 'γ'),
+    (r'\\delta', 'δ'),
+    (r'\\epsilon', 'ε'),
+    (r'\\varepsilon', 'ε'),
+    (r'\\zeta', 'ζ'),
+    (r'\\eta', 'η'),
+    (r'\\theta', 'θ'),
+    (r'\\vartheta', 'θ'),
+    (r'\\iota', 'ι'),
+    (r'\\kappa', 'κ'),
+    (r'\\lambda', 'λ'),
+    (r'\\mu', 'μ'),
+    (r'\\nu', 'ν'),
+    (r'\\xi', 'ξ'),
+    (r'\\pi', 'π'),
+    (r'\\rho', 'ρ'),
+    (r'\\sigma', 'σ'),
+    (r'\\tau', 'τ'),
+    (r'\\phi', 'φ'),
+    (r'\\varphi', 'φ'),
+    (r'\\chi', 'χ'),
+    (r'\\psi', 'ψ'),
+    (r'\\omega', 'ω'),
+    (r'\\Gamma', 'Γ'),
+    (r'\\Delta', 'Δ'),
+    (r'\\Theta', 'Θ'),
+    (r'\\Lambda', 'Λ'),
+    (r'\\Xi', 'Ξ'),
+    (r'\\Pi', 'Π'),
+    (r'\\Sigma', 'Σ'),
+    (r'\\Phi', 'Φ'),
+    (r'\\Psi', 'Ψ'),
+    (r'\\Omega', 'Ω'),
+    (r'\\sum', '∑'),
+    (r'\\prod', '∏'),
+    (r'\\int', '∫'),
+    (r'\\iint', '∬'),
+    (r'\\iiint', '∭'),
+    (r'\\partial', '∂'),
+    (r'\\nabla', '∇'),
+    (r'\\left\(', '('),
+    (r'\\right\)', ')'),
+    (r'\\left\[', '['),
+    (r'\\right\]', ']'),
+    (r'\\left\\\{', '{'),
+    (r'\\right\\\}', '}'),
+    (r'\\\{', '{'),
+    (r'\\\}', '}'),
+    (r'\\quad', '  '),
+    (r'\\qquad', '    '),
+    (r'\\,', ' '),
+    (r'\\;', ' '),
+    (r'\\!', ''),
+    (r'\\text\{([^}]+)\}', r'\1'),
+    (r'\\mathrm\{([^}]+)\}', r'\1'),
+    (r'\\mathbf\{([^}]+)\}', r'\1'),
+    (r'\\boldsymbol\{([^}]+)\}', r'\1'),
+]
 
 
-def format_stats_summary(fuel_stats: Dict[str, Any]) -> str:
-    """Форматирует общую статистику расходов."""
-    lines = [
-        "📊 <b>Сводная статистика по автомобилю:</b>\n",
-        f"• <b>Всего заправок:</b> <code>{fuel_stats.get('count', 0)}</code>",
-        f"• <b>Суммарный объем топлива:</b> <code>{fuel_stats.get('total_liters', 0.0)} л</code>",
-        f"• <b>Всего потрачено на топливо:</b> <code>{fuel_stats.get('total_cost', 0.0):,.2f} ₽</code>",
-        f"• <b>Средняя цена за литр:</b> <code>{fuel_stats.get('avg_price_per_liter', 0.0):.2f} ₽</code>",
-        f"• <b>Текущий зафиксированный пробег:</b> <code>{fuel_stats.get('max_odometer', 0):,} км</code>".replace(",", " ")
-    ]
-    return "\n".join(lines)
+def to_sup(text: str) -> str:
+    """Конвертирует строку в надстрочные символы Unicode."""
+    return "".join(SUPERSCRIPTS.get(c, c) for c in text)
 
 
-def md_to_telegram_html(text: str) -> str:
+def to_sub(text: str) -> str:
+    """Конвертирует строку в подстрочные символы Unicode."""
+    return "".join(SUBSCRIPTS.get(c, c) for c in text)
+
+
+def convert_latex_math(text: str) -> str:
     """
-    Конвертирует стандартный Markdown и LaTeX формулы в валидный HTML для Telegram.
-    - Защищает блоки кода ```lang ... ``` и формулы LaTeX ($$...$$, \\[...\\], $...$, \\(...\\)).
-    - Экранирует HTML символы (<, >, &) в обычном тексте.
-    - Преобразует заголовки (### Заголовок) в <b>Заголовок</b>.
-    - Преобразует **жирный** и __жирный__ в <b>жирный</b>.
-    - Преобразует *курсив* и _курсив_ в <i>курсив</i>.
-    - Преобразует цитаты (> цитата) в <blockquote>цитата</blockquote>.
-    - Восстанавливает блоки LaTeX в <pre><code class="language-latex">...</code></pre>.
-    - Восстанавливает инлайн LaTeX и код в <code>...</code>.
-    - Восстанавливает блоки кода в <pre><code class="language-...">...</code></pre>.
+    Преобразует математические выражения и команды LaTeX в красивый человекочитаемый Unicode.
+    Пример: \\sqrt{38} -> √38, x^2 -> x², x_1 -> x₁, \\pm -> ±, \\approx -> ≈.
     """
     if not text:
         return ""
 
-    placeholders = []
+    # Замена корней \sqrt[n]{x} и \sqrt{x}
+    text = re.sub(r'\\sqrt\[(\d+)\]\{([^}]+)\}', r'\1√(\2)', text)
+    def repl_sqrt(m):
+        inner = m.group(1).strip()
+        if len(inner) <= 3 and not any(op in inner for op in '+-*/±= '):
+            return f"√{inner}"
+        return f"√({inner})"
+    text = re.sub(r'\\sqrt\{([^}]+)\}', repl_sqrt, text)
 
-    def repl_block(m):
-        placeholders.append(m.group(0))
-        return f"@@BLOCK{len(placeholders)-1}BLOCK@@"
+    # Замена дробей \frac{a}{b} -> (a) / (b)
+    def repl_frac(m):
+        num = m.group(1).strip()
+        den = m.group(2).strip()
+        if len(num) <= 2 and len(den) <= 2 and not any(op in num+den for op in '+-*/±= '):
+            return f"{num}/{den}"
+        return f"({num}) / ({den})"
+    text = re.sub(r'\\frac\{([^}]+)\}\{([^}]+)\}', repl_frac, text)
 
-    # 1. Блоки кода ```lang\n...```
-    text = re.sub(r'```(?:[a-zA-Z0-9_\-]+)?\n?[\s\S]*?```', repl_block, text)
+    # Замена стандартных символов и команд
+    for pattern, repl in LATEX_SYMBOLS:
+        text = re.sub(pattern, repl, text)
 
-    # 2. Блочные LaTeX формулы: $$ ... $$ и \[ ... \]
-    text = re.sub(r'\$\$[\s\S]*?\$\$', repl_block, text)
-    text = re.sub(r'\\\[[\s\S]*?\\\]', repl_block, text)
+    # Степени: ^{...} или ^x
+    text = re.sub(r'\^\{([0-9a-zA-Z+-]+)\}', lambda m: to_sup(m.group(1)), text)
+    text = re.sub(r'\^([0-9a-zA-Z+-])', lambda m: to_sup(m.group(1)), text)
 
-    # 3. Инлайн LaTeX формулы: $ ... $ и \( ... \)
-    text = re.sub(r'(?<!\$)\$(?!\$)[^$\n]+(?<!\$)\$(?!\$)', repl_block, text)
-    text = re.sub(r'\\\([^\n]+?\\\)', repl_block, text)
+    # Индексы: _{...} или _x
+    text = re.sub(r'_\{([0-9a-zA-Z+-,;]+)\}', lambda m: to_sub(m.group(1)), text)
+    text = re.sub(r'_([0-9a-zA-Z+-])', lambda m: to_sub(m.group(1)), text)
 
-    # 4. Инлайн код `...`
-    text = re.sub(r'`[^`\n]+`', repl_block, text)
+    # Убираем оставшиеся обратные слэши перед словами
+    text = re.sub(r'\\([a-zA-Z]+)', r'\1', text)
 
-    # 5. Экранируем HTML символы в обычном тексте (<, >, &)
+    return text
+
+
+def md_to_telegram_html(text: str) -> str:
+    """
+    Конвертирует Markdown и математику в валидный, красивый HTML для Telegram:
+    - Блоки формул и вычислений преобразует в аккуратные цитаты <blockquote><b>...</b></blockquote>.
+    - Всю математическую нотацию (LaTeX, степени, корни, индексы) переводит в Unicode.
+    - Блоки настоящего программного кода (python, bash, js и т.д.) оформляет в <pre><code class="language-...">.
+    - Обычный текст экранирует (py_html.escape) и форматирует жирным <b>, курсивом <i>, заголовками.
+    """
+    if not text:
+        return ""
+
+    code_blocks = []
+    inline_codes = []
+    math_blocks = []
+    math_inlines = []
+
+    # 1. Выделяем блоки математики в тройных кавычках: ```latex ... ``` или ```math ... ```
+    def save_math_code_block(m):
+        raw_inner = m.group(1).strip()
+        converted = convert_latex_math(raw_inner)
+        math_blocks.append(converted)
+        return f"\nXXMATHBLOCK{len(math_blocks)-1}XX\n"
+
+    text = re.sub(r'```(?:latex|math)\n?([\s\S]*?)```', save_math_code_block, text)
+
+    # 2. Сохраняем обычные блоки кода программирования (python, bash, sql, etc.)
+    def save_code_block(m):
+        code_blocks.append(m.group(0))
+        return f"XXCODEBLOCK{len(code_blocks)-1}XX"
+
+    text = re.sub(r'```(?:[a-zA-Z0-9_\-]+)?\n?[\s\S]*?```', save_code_block, text)
+
+    # 3. Сохраняем инлайн код программирования `...`
+    def save_inline_code(m):
+        inline_codes.append(m.group(0))
+        return f"XXINLINECODE{len(inline_codes)-1}XX"
+
+    text = re.sub(r'`[^`\n]+`', save_inline_code, text)
+
+    # 4. Блочные формулы: $$ ... $$ и \[ ... \] -> преобразуем в блоки цитат Telegram
+    def save_display_math(m):
+        raw_inner = m.group(1).strip()
+        converted = convert_latex_math(raw_inner)
+        math_blocks.append(converted)
+        return f"\nXXMATHBLOCK{len(math_blocks)-1}XX\n"
+
+    text = re.sub(r'\$\$([\s\S]*?)\$\$', save_display_math, text)
+    text = re.sub(r'\\\[([\s\S]*?)\\\]', save_display_math, text)
+
+    # 5. Инлайн формулы: $ ... $ и \( ... \) -> преобразуем в жирный Unicode
+    def save_inline_math(m):
+        raw_inner = m.group(1).strip()
+        converted = convert_latex_math(raw_inner)
+        math_inlines.append(converted)
+        return f"XXMATHINLINE{len(math_inlines)-1}XX"
+
+    text = re.sub(r'(?<!\$)\$(?!\$)([^$\n]+)(?<!\$)\$(?!\$)', save_inline_math, text)
+    text = re.sub(r'\\\((.+?)\\\)', save_inline_math, text)
+
+    # 6. Преобразуем любые оставшиеся LaTeX команды в обычном тексте (\sqrt{...}, \approx, x^2, x_1)
+    text = convert_latex_math(text)
+
+    # 7. Безопасно экранируем HTML символы (<, >, &) в оставшемся обычном тексте
     text = py_html.escape(text, quote=False)
 
-    # 6. Заголовки (#, ##, ###)
+    # 8. Заголовки (#, ##, ###)
     text = re.sub(r'^[ \t]*#{1,6}\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
 
-    # 7. Жирный текст (**жирный** или __жирный__)
+    # 9. Жирный текст (**жирный** или __жирный__)
     text = re.sub(r'\*\*([^*]+)\*\*', r'<b>\1</b>', text)
     text = re.sub(r'__([^_]+)__', r'<b>\1</b>', text)
 
-    # 8. Курсив (*курсив* или _курсив_)
+    # 10. Курсив (*курсив* или _курсив_)
     text = re.sub(r'(?<!\w)\*([^*]+)\*(?!\w)', r'<i>\1</i>', text)
     text = re.sub(r'(?<!\w)_([^_]+)_(?!\w)', r'<i>\1</i>', text)
 
-    # 9. Цитаты (> цитата или &gt; цитата)
+    # 11. Цитаты (> цитата или &gt; цитата)
     text = re.sub(r'^[ \t]*(?:>|&gt;)\s*(.+)$', r'<blockquote>\1</blockquote>', text, flags=re.MULTILINE)
 
-    # 10. Восстанавливаем сохраненные блоки
-    def restore_block(m):
+    # 12. Восстанавливаем блоки формул в виде Telegram blockquote
+    def restore_math_block(m):
         idx = int(m.group(1))
-        raw = placeholders[idx]
+        content = py_html.escape(math_blocks[idx], quote=False)
+        return f"<blockquote><b>{content}</b></blockquote>"
 
-        # Блочный код
-        if raw.startswith("```"):
-            lang_match = re.match(r'```([a-zA-Z0-9_\-]+)?\n?([\s\S]*?)```', raw)
-            lang = lang_match.group(1).strip() if lang_match and lang_match.group(1) else ""
-            code_content = lang_match.group(2) if lang_match else raw[3:-3]
-            code_esc = py_html.escape(code_content.strip(), quote=False)
-            if lang:
-                return f'<pre><code class="language-{lang}">{code_esc}</code></pre>'
-            return f'<pre>{code_esc}</pre>'
+    text = re.sub(r'XXMATHBLOCK(\d+)XX', restore_math_block, text)
 
-        # Блочный LaTeX $$...$$ или \[...\]
-        elif raw.startswith("$$") or raw.startswith("\\["):
-            body = raw[2:-2].strip()
-            math_esc = py_html.escape(body, quote=False)
-            return f'<pre><code class="language-latex">{math_esc}</code></pre>'
+    # 13. Восстанавливаем инлайн формулы
+    def restore_math_inline(m):
+        idx = int(m.group(1))
+        content = py_html.escape(math_inlines[idx], quote=False)
+        return f"<b>{content}</b>"
 
-        # Инлайн LaTeX $...$ или \(...\)
-        elif raw.startswith("$") or raw.startswith("\\("):
-            body = raw[2:-2].strip() if raw.startswith("\\(") else raw[1:-1].strip()
-            math_esc = py_html.escape(body, quote=False)
-            return f'<code>{math_esc}</code>'
+    text = re.sub(r'XXMATHINLINE(\d+)XX', restore_math_inline, text)
 
-        # Инлайн код `...`
-        elif raw.startswith("`"):
-            code_esc = py_html.escape(raw[1:-1], quote=False)
-            return f'<code>{code_esc}</code>'
+    # 14. Восстанавливаем блоки программного кода
+    def restore_code_block(m):
+        idx = int(m.group(1))
+        raw = code_blocks[idx]
+        lang_match = re.match(r'```([a-zA-Z0-9_\-]+)?\n?([\s\S]*?)```', raw)
+        lang = lang_match.group(1).strip() if lang_match and lang_match.group(1) else ""
+        code_content = lang_match.group(2) if lang_match else raw[3:-3]
+        code_esc = py_html.escape(code_content.strip(), quote=False)
+        if lang:
+            return f'<pre><code class="language-{lang}">{code_esc}</code></pre>'
+        return f'<pre>{code_esc}</pre>'
 
-        return raw
+    text = re.sub(r'XXCODEBLOCK(\d+)XX', restore_code_block, text)
 
-    text = re.sub(r'@@BLOCK(\d+)BLOCK@@', restore_block, text)
-    return text
+    # 15. Восстанавливаем инлайн код программирования `...`
+    def restore_inline_code(m):
+        idx = int(m.group(1))
+        raw = inline_codes[idx]
+        code_esc = py_html.escape(raw[1:-1], quote=False)
+        return f'<code>{code_esc}</code>'
+
+    text = re.sub(r'XXINLINECODE(\d+)XX', restore_inline_code, text)
+
+    # 16. Нормализуем пустые строки
+    text = re.sub(r'\n{3,}', '\n\n', text)
+
+    return text.strip()
 
 
 def split_telegram_chunks(text: str, max_chunk_size: int = 3800) -> list[str]:
