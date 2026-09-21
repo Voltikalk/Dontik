@@ -9,7 +9,7 @@ from aiogram.types import Message
 from bot.config import settings
 from bot.database.db import get_session
 from bot.database import crud
-from bot.services.file_parser import extract_text_from_file
+from bot.services.file_parser import extract_text_from_file, parse_pdf_smart
 from bot.services.vision import analyze_image
 from bot.services.assistant import answer_query
 from bot.services.formatters import send_formatted_message
@@ -47,9 +47,10 @@ async def handle_document_message(message: Message, bot: Bot):
     try:
         await bot.download(doc.file_id, destination=str(temp_file))
 
-        # Если документ на самом деле является изображением
         mime = (doc.mime_type or "").lower()
         ext = Path(filename).suffix.lower()
+
+        # 1. Если документ на самом деле является изображением
         if mime.startswith("image/") or ext in [".jpg", ".jpeg", ".png", ".webp", ".bmp"]:
             image_bytes = temp_file.read_bytes()
             async with get_session() as session:
@@ -71,8 +72,38 @@ async def handle_document_message(message: Message, bot: Bot):
                 await crud.add_chat_message(session, user_id=user_id, role="assistant", content=answer)
             return
 
-        # Извлечение текста из документа (PDF, Word, Excel, CSV, TXT)
-        extracted_text = extract_text_from_file(str(temp_file), filename)
+        # 2. Если документ PDF: проверяем через умный парсер (текст или скан/сертификат)
+        if ext == ".pdf":
+            kind, text_content, pdf_image_bytes = parse_pdf_smart(str(temp_file))
+            if kind == "image" and pdf_image_bytes:
+                async with get_session() as session:
+                    history = await crud.get_recent_chat_history(session, user_id=user_id, limit=8)
+
+                caption = (message.caption or "").strip()
+                pdf_caption = caption if caption else (
+                    f"Это визуальный PDF документ или сертификат «{filename}». "
+                    "Внимательно изучи его, распознай весь видимый текст, имена, названия, сертификаты, даты, печати или таблицы "
+                    "и подготовь подробный структурированный ответ на русском языке."
+                )
+                answer = await analyze_image(image_bytes=pdf_image_bytes, caption=pdf_caption, history=history)
+
+                try:
+                    await status_msg.delete()
+                except Exception:
+                    pass
+
+                await send_formatted_message(message, answer)
+
+                user_log = f"Отправил визуальный PDF документ «{filename}». " + (f"Подпись: «{caption}»" if caption else "Просьба разобрать содержимое.")
+                async with get_session() as session:
+                    await crud.add_chat_message(session, user_id=user_id, role="user", content=user_log)
+                    await crud.add_chat_message(session, user_id=user_id, role="assistant", content=answer)
+                return
+            else:
+                extracted_text = text_content or ""
+        else:
+            # 3. Извлечение текста из других документов (Word, Excel, CSV, TXT)
+            extracted_text = extract_text_from_file(str(temp_file), filename)
 
         if not extracted_text or extracted_text.startswith("Не удалось") or extracted_text.startswith("Формат файла"):
             try:

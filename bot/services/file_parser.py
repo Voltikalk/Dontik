@@ -9,36 +9,137 @@ logger = logging.getLogger(__name__)
 MAX_CHARS_LIMIT = 25000  # Максимальное количество символов из одного документа для LLM
 
 
+import io
+import pymupdf
+from PIL import Image
+
+def is_text_meaningful(text: str) -> bool:
+    """
+    Проверяет, является ли извлеченный текст осмысленным и читаемым человеком,
+    а не набором битых шрифтов, кракозябр или спецсимволов.
+    """
+    clean_text = text.strip()
+    if len(clean_text) < 30:
+        return False
+
+    alpha_chars = sum(1 for c in clean_text if c.isalpha())
+    total_chars = len(clean_text)
+
+    # Доля букв (латиница или кириллица) должна быть не менее 45%
+    if (alpha_chars / total_chars) < 0.45:
+        return False
+
+    # Проверяем наличие гласных букв
+    vowels = set("аеёиоуыэюяaeiouyАЕЁИОУЫЭЮЯAEIOUY")
+    vowel_count = sum(1 for c in clean_text if c in vowels)
+    if (vowel_count / max(1, alpha_chars)) < 0.15:
+        return False
+
+    return True
+
+
+def render_pdf_to_image_bytes(doc: pymupdf.Document, max_pages: int = 3, dpi: int = 160) -> bytes:
+    """
+    Рендерит первые max_pages страниц PDF в одно объединенное JPEG изображение
+    для последующего оптического анализа (Vision OCR).
+    """
+    images = []
+    num_pages = min(len(doc), max_pages)
+    for i in range(num_pages):
+        page = doc[i]
+        pix = page.get_pixmap(dpi=dpi)
+        img = Image.open(io.BytesIO(pix.tobytes("jpeg")))
+        images.append(img)
+
+    if not images:
+        return b""
+
+    if len(images) == 1:
+        buf = io.BytesIO()
+        images[0].save(buf, format="JPEG", quality=90)
+        return buf.getvalue()
+
+    # Склеиваем страницы вертикально
+    total_height = sum(img.height for img in images)
+    max_width = max(img.width for img in images)
+    combined = Image.new("RGB", (max_width, total_height), color="white")
+    y_offset = 0
+    for img in images:
+        combined.paste(img, (0, y_offset))
+        y_offset += img.height
+
+    buf = io.BytesIO()
+    combined.save(buf, format="JPEG", quality=88)
+    return buf.getvalue()
+
+
+def parse_pdf_smart(file_path: str, max_chars: int = MAX_CHARS_LIMIT):
+    """
+    Интеллектуальный разбор PDF:
+    - Извлекает текстовый слой через PyMuPDF.
+    - Если текст осмысленный и подробный -> возвращает ('text', text, None).
+    - Если документ является сканом, сертификатом, чеком или текст поврежден/кракозябры ->
+      рендерит страницы в высококачественное изображение для компьютерного зрения ('image', None, image_bytes).
+    """
+    try:
+        doc = pymupdf.open(file_path)
+        total_pages = len(doc)
+        extracted_text = []
+        current_len = 0
+
+        for idx, page in enumerate(doc, 1):
+            page_text = (page.get_text("text") or "").strip()
+            if not page_text:
+                continue
+            header = f"\n--- [Страница {idx} из {total_pages}] ---\n"
+            if current_len + len(header) + len(page_text) > max_chars:
+                extracted_text.append(header)
+                remaining = max_chars - current_len - len(header)
+                if remaining > 50:
+                    extracted_text.append(page_text[:remaining] + "\n... [текст документа далее усечен по лимиту объема]")
+                break
+            extracted_text.append(header + page_text)
+            current_len += len(header) + len(page_text)
+
+        full_text = "\n".join(extracted_text).strip()
+
+        # Если текста мало или он битый (кракозябры, нераспознанный шрифт, сертификат-картинка)
+        # переключаемся на Vision рендеринг страниц
+        is_sparse_or_short = (total_pages <= 2 and len(full_text) < 120)
+        if not is_text_meaningful(full_text) or is_sparse_or_short:
+            logger.info(f"PDF {file_path} распознан как визуальный документ (скан/сертификат/кракозябры). Рендерим страницы в изображение...")
+            img_bytes = render_pdf_to_image_bytes(doc, max_pages=3, dpi=160)
+            if img_bytes:
+                return "image", None, img_bytes
+
+        if full_text:
+            return "text", full_text, None
+
+    except Exception as e:
+        logger.warning(f"Ошибка в pymupdf при анализе {file_path}: {e}. Пробуем запасной вариант...")
+
+    # Запасной вариант через pypdf
+    try:
+        import pypdf
+        reader = pypdf.PdfReader(file_path)
+        extracted = []
+        for p in reader.pages:
+            t = p.extract_text()
+            if t:
+                extracted.append(t)
+        pypdf_text = "\n".join(extracted).strip()
+        if is_text_meaningful(pypdf_text):
+            return "text", pypdf_text, None
+    except Exception:
+        pass
+
+    return "text", "В PDF-документе не удалось найти печатный текст или отрендерить страницы.", None
+
+
 def parse_pdf(file_path: str, max_chars: int = MAX_CHARS_LIMIT) -> str:
-    """Извлекает текст из PDF документа с разбивкой по страницам."""
-    import pypdf
-
-    reader = pypdf.PdfReader(file_path)
-    total_pages = len(reader.pages)
-    extracted_text = []
-    current_len = 0
-
-    for idx, page in enumerate(reader.pages, 1):
-        page_text = page.extract_text() or ""
-        page_text = page_text.strip()
-        if not page_text:
-            continue
-
-        header = f"\n--- [Страница {idx} из {total_pages}] ---\n"
-        if current_len + len(header) + len(page_text) > max_chars:
-            extracted_text.append(header)
-            remaining = max_chars - current_len - len(header)
-            if remaining > 50:
-                extracted_text.append(page_text[:remaining] + "\n... [текст документа далее усечен по лимиту объема]")
-            break
-
-        extracted_text.append(header + page_text)
-        current_len += len(header) + len(page_text)
-
-    if not extracted_text:
-        return "В PDF-документе не удалось найти печатный текст (возможно, документ состоит из сканов/изображений без OCR)."
-
-    return "\n".join(extracted_text)
+    """Для обратной совместимости извлечения текста."""
+    kind, text, _ = parse_pdf_smart(file_path, max_chars)
+    return text or "Документ не содержит читаемого текста."
 
 
 def parse_docx(file_path: str, max_chars: int = MAX_CHARS_LIMIT) -> str:
