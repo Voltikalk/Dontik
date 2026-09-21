@@ -11,6 +11,8 @@ from bot.database.db import init_db
 from bot.middlewares.auth import AccessMiddleware
 from bot.handlers import main_router
 
+from aiogram.types import BotCommand, BotCommandScopeDefault
+
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
@@ -18,6 +20,19 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger("auto_garage_bot")
+
+
+async def setup_bot_commands(bot: Bot) -> None:
+    """Установка списка команд в кнопке 'Меню' строки ввода Telegram."""
+    commands = [
+        BotCommand(command="tasks", description="📋 Список дел и задач"),
+        BotCommand(command="stats", description="📊 Сводка: авто, заправки, ТО"),
+        BotCommand(command="items", description="📦 Вещи в гараже/на даче"),
+        BotCommand(command="help", description="💡 Справка и примеры команд"),
+        BotCommand(command="start", description="🔄 Главное меню"),
+    ]
+    await bot.set_my_commands(commands=commands, scope=BotCommandScopeDefault())
+    logger.info("Список команд успешно установлен в строке ввода бота.")
 
 
 async def main() -> None:
@@ -53,11 +68,15 @@ async def main() -> None:
     # 4. Подключение роутеров хэндлеров
     dp.include_router(main_router)
 
-    # 5. Сброс зависших вебхуков и старт polling
+    # 5. Сброс зависших вебхуков, установка команд и старт polling
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         bot_user = await bot.get_me()
         logger.info(f"Бот успешно авторизован в Telegram как @{bot_user.username} (ID: {bot_user.id})")
+
+        # Регистрация команд в интерфейсе Telegram
+        await setup_bot_commands(bot)
+
         logger.info("Начинается опрос обновлений (polling)...")
         await dp.start_polling(bot)
     except Exception as e:

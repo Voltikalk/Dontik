@@ -107,3 +107,59 @@ async def cmd_tasks(message: Message):
     kb = get_tasks_keyboard(tasks)
     await message.answer("\n".join(lines), reply_markup=kb)
 
+
+@router.message(Command("items", "garage"))
+async def cmd_items(message: Message):
+    """
+    Обработчик команды /items и /garage.
+    Выводит список сохраненных вещей в гараже/на даче.
+    """
+    user_id = message.from_user.id
+    async with get_session() as session:
+        items = await crud.list_all_items(session, user_id=user_id)
+
+    if not items:
+        await message.answer(
+            "📦 <b>В гараже пока ничего не записано.</b>\n\n"
+            "Чтобы сохранить местоположение вещи, просто скажите голосовым сообщением, например:\n"
+            "<i>«Положил домкрат под верстак»</i>"
+        )
+        return
+
+    lines = ["📦 <b>Список вещей на хранении:</b>\n"]
+    for idx, it in enumerate(items, 1):
+        lines.append(f"{idx}. <b>{html.quote(it.item_name)}</b> — <code>{html.quote(it.location)}</code>")
+    lines.append("\n💡 <i>Чтобы найти конкретную вещь, спросите голосовым: «Где лежит ...?»</i>")
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("help"))
+async def cmd_help(message: Message):
+    """
+    Обработчик команды /help.
+    Справочная информация и примеры использования.
+    """
+    text = (
+        "💡 <b>Как пользоваться ботом «Авто-Гараж Ассистент»:</b>\n\n"
+        "🎙 <b>Голосовое управление:</b>\n"
+        "Зажмите кнопку микрофона и говорите своими словами:\n\n"
+        "📝 <b>Задачи и напоминания:</b>\n"
+        "• <i>«Запиши на завтра съездить на работу к Николаю Викторовичу»</i>\n"
+        "• <i>«Напомни в субботу поменять масло»</i>\n"
+        "• <i>«Какие у меня дела?»</i> (выведет список активных задач)\n\n"
+        "⛽ <b>Заправки автомобиля:</b>\n"
+        "• <i>«Заправил сорок литров на 2500 рублей, пробег 155 000, Газпромнефть»</i>\n\n"
+        "🔧 <b>Сервис и ремонты:</b>\n"
+        "• <i>«Поменял тормозные диски и колодки, отдал 8000 руб, пробег 156 000»</i>\n\n"
+        "📦 <b>Поиск и хранение вещей:</b>\n"
+        "• <i>«Положил зарядник для аккумулятора в синий ящик»</i>\n"
+        "• <i>«Где лежит зарядник?»</i>\n\n"
+        "📌 <b>Быстрые команды из меню ввода:</b>\n"
+        "/tasks — актуальный список дел\n"
+        "/stats — сводка по заправкам и ремонтам\n"
+        "/items — каталог вещей в гараже\n"
+        "/start — перезапуск и приветствие"
+    )
+    await message.answer(text)
+
+
