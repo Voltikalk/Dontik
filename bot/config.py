@@ -12,8 +12,8 @@ class Settings(BaseSettings):
     ALLOWED_TELEGRAM_IDS: Union[List[int], str] = []
 
     DATABASE_URL: str = "sqlite+aiosqlite:///data/garage.db"
-    GROQ_MODEL: str = "llama-3.3-70b-versatile"
-    GROQ_WHISPER_MODEL: str = "whisper-large-v3"
+    GROQ_MODEL: str = "qwen/qwen3.8-27b"
+    GROQ_WHISPER_MODEL: str = "whisper-large-v3-turbo"
 
     model_config = SettingsConfigDict(
         env_file=".env",

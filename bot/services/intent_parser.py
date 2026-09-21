@@ -67,39 +67,41 @@ def get_groq_client() -> AsyncOpenAI:
 
 async def parse_user_intent(text: str) -> Dict[str, Any]:
     """
-    Парсит текст пользователя через модель llama-3.3-70b-versatile в строгий JSON.
-    
-    Возвращает словарь формата:
-    {
-        "intent": "fuel" | "service" | "item_save" | "item_find" | "unknown",
-        "data": { ... }
-    }
+    Парсит текст пользователя через Groq LLM в строгий JSON.
+    Использует qwen/qwen3.8-27b с автоматическим fallback на gpt-oss-120b.
     """
     client = get_groq_client()
 
-    try:
-        response = await client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": text}
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.1
-        )
+    candidate_models = [settings.GROQ_MODEL]
+    for fallback in ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b", "groq/compound-mini"]:
+        if fallback not in candidate_models:
+            candidate_models.append(fallback)
 
-        content = response.choices[0].message.content or "{}"
-        parsed = json.loads(content)
+    for model_name in candidate_models:
+        try:
+            response = await client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": text}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.1
+            )
 
-        # Валидация базовой структуры
-        if "intent" not in parsed or "data" not in parsed:
-            return {"intent": "unknown", "data": {}}
+            content = response.choices[0].message.content or "{}"
+            parsed = json.loads(content)
 
-        return parsed
+            if "intent" in parsed and "data" in parsed:
+                logger.info(f"Успешный парсинг интента моделью {model_name}: {parsed.get('intent')}")
+                return parsed
 
-    except json.JSONDecodeError as e:
-        logger.error(f"Ошибка декодирования JSON от Groq LLM: {e}")
-        return {"intent": "unknown", "data": {}}
-    except Exception as e:
-        logger.error(f"Ошибка при вызове Groq LLM: {e}", exc_info=True)
-        return {"intent": "unknown", "data": {}}
+        except json.JSONDecodeError as e:
+            logger.warning(f"Ошибка JSONDecode от модели {model_name}: {e}")
+            continue
+        except Exception as e:
+            logger.warning(f"Модель {model_name} вернула ошибку: {e}. Пробуем следующую модель...")
+            continue
+
+    logger.error("Все доступные модели Groq не смогли разобрать сообщение")
+    return {"intent": "unknown", "data": {}}
