@@ -1,6 +1,13 @@
-from aiogram import html
+import re
+import logging
 from typing import Dict, Any, List
+from aiogram import html
+from aiogram.enums import ParseMode
+from aiogram.types import Message
+
 from bot.database.models import FuelLog, ServiceLog, ItemLocation
+
+logger = logging.getLogger(__name__)
 
 
 def format_fuel_card(data: Dict[str, Any], raw_text: str = "") -> str:
@@ -147,3 +154,146 @@ def format_stats_summary(fuel_stats: Dict[str, Any]) -> str:
         f"• <b>Текущий зафиксированный пробег:</b> <code>{fuel_stats.get('max_odometer', 0):,} км</code>".replace(",", " ")
     ]
     return "\n".join(lines)
+
+
+def md_to_telegram_html(text: str) -> str:
+    """
+    Конвертирует стандартный Markdown и LaTeX формулы в валидный HTML для Telegram.
+    - Защищает блоки кода ```lang ... ``` и формулы LaTeX ($$...$$, \\[...\\], $...$, \\(...\\)).
+    - Экранирует HTML символы (<, >, &) в обычном тексте.
+    - Преобразует заголовки (### Заголовок) в <b>Заголовок</b>.
+    - Преобразует **жирный** и __жирный__ в <b>жирный</b>.
+    - Преобразует *курсив* и _курсив_ в <i>курсив</i>.
+    - Преобразует цитаты (> цитата) в <blockquote>цитата</blockquote>.
+    - Восстанавливает блоки LaTeX в <pre><code class="language-latex">...</code></pre>.
+    - Восстанавливает инлайн LaTeX и код в <code>...</code>.
+    - Восстанавливает блоки кода в <pre><code class="language-...">...</code></pre>.
+    """
+    if not text:
+        return ""
+
+    placeholders = []
+
+    def repl_block(m):
+        placeholders.append(m.group(0))
+        return f"@@BLOCK{len(placeholders)-1}BLOCK@@"
+
+    # 1. Блоки кода ```lang\n...```
+    text = re.sub(r'```(?:[a-zA-Z0-9_\-]+)?\n?[\s\S]*?```', repl_block, text)
+
+    # 2. Блочные LaTeX формулы: $$ ... $$ и \[ ... \]
+    text = re.sub(r'\$\$[\s\S]*?\$\$', repl_block, text)
+    text = re.sub(r'\\\[[\s\S]*?\\\]', repl_block, text)
+
+    # 3. Инлайн LaTeX формулы: $ ... $ и \( ... \)
+    text = re.sub(r'(?<!\$)\$(?!\$)[^$\n]+(?<!\$)\$(?!\$)', repl_block, text)
+    text = re.sub(r'\\\([^\n]+?\\\)', repl_block, text)
+
+    # 4. Инлайн код `...`
+    text = re.sub(r'`[^`\n]+`', repl_block, text)
+
+    # 5. Экранируем HTML символы в обычном тексте (<, >, &)
+    text = html.escape(text, quote=False)
+
+    # 6. Заголовки (#, ##, ###)
+    text = re.sub(r'^[ \t]*#{1,6}\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
+
+    # 7. Жирный текст (**жирный** или __жирный__)
+    text = re.sub(r'\*\*([^*]+)\*\*', r'<b>\1</b>', text)
+    text = re.sub(r'__([^_]+)__', r'<b>\1</b>', text)
+
+    # 8. Курсив (*курсив* или _курсив_)
+    text = re.sub(r'(?<!\w)\*([^*]+)\*(?!\w)', r'<i>\1</i>', text)
+    text = re.sub(r'(?<!\w)_([^_]+)_(?!\w)', r'<i>\1</i>', text)
+
+    # 9. Цитаты (> цитата или &gt; цитата)
+    text = re.sub(r'^[ \t]*(?:>|&gt;)\s*(.+)$', r'<blockquote>\1</blockquote>', text, flags=re.MULTILINE)
+
+    # 10. Восстанавливаем сохраненные блоки
+    def restore_block(m):
+        idx = int(m.group(1))
+        raw = placeholders[idx]
+
+        # Блочный код
+        if raw.startswith("```"):
+            lang_match = re.match(r'```([a-zA-Z0-9_\-]+)?\n?([\s\S]*?)```', raw)
+            lang = lang_match.group(1).strip() if lang_match and lang_match.group(1) else ""
+            code_content = lang_match.group(2) if lang_match else raw[3:-3]
+            code_esc = html.escape(code_content.strip(), quote=False)
+            if lang:
+                return f'<pre><code class="language-{lang}">{code_esc}</code></pre>'
+            return f'<pre>{code_esc}</pre>'
+
+        # Блочный LaTeX $$...$$ или \[...\]
+        elif raw.startswith("$$") or raw.startswith("\\["):
+            body = raw[2:-2].strip()
+            math_esc = html.escape(body, quote=False)
+            return f'<pre><code class="language-latex">{math_esc}</code></pre>'
+
+        # Инлайн LaTeX $...$ или \(...\)
+        elif raw.startswith("$") or raw.startswith("\\("):
+            body = raw[2:-2].strip() if raw.startswith("\\(") else raw[1:-1].strip()
+            math_esc = html.escape(body, quote=False)
+            return f'<code>{math_esc}</code>'
+
+        # Инлайн код `...`
+        elif raw.startswith("`"):
+            code_esc = html.escape(raw[1:-1], quote=False)
+            return f'<code>{code_esc}</code>'
+
+        return raw
+
+    text = re.sub(r'@@BLOCK(\d+)BLOCK@@', restore_block, text)
+    return text
+
+
+def split_telegram_chunks(text: str, max_chunk_size: int = 3800) -> list[str]:
+    """Разбивает длинный текст на части с сохранением целостности строк/абзацев."""
+    if len(text) <= max_chunk_size:
+        return [text]
+
+    chunks = []
+    lines = text.split("\n")
+    current_chunk = []
+    current_len = 0
+
+    for line in lines:
+        line_len = len(line) + 1
+        if current_len + line_len > max_chunk_size and current_chunk:
+            chunks.append("\n".join(current_chunk))
+            current_chunk = [line]
+            current_len = line_len
+        else:
+            current_chunk.append(line)
+            current_len += line_len
+
+    if current_chunk:
+        chunks.append("\n".join(current_chunk))
+
+    return chunks
+
+
+async def send_formatted_message(message: Message, text: str, reply_markup=None):
+    """
+    Отправляет пользователю сообщение с красивой разметкой и формулами.
+    - Конвертирует Markdown и LaTeX в Telegram HTML.
+    - Автоматически разбивает на сообщения, если превышен лимит 4096 символов.
+    - В случае редких ошибок парсинга Telegram плавно откатывается к чистому тексту.
+    """
+    if not text:
+        return
+
+    html_content = md_to_telegram_html(text)
+    chunks = split_telegram_chunks(html_content)
+
+    for i, chunk in enumerate(chunks):
+        is_last = (i == len(chunks) - 1)
+        kb = reply_markup if is_last else None
+        try:
+            await message.answer(chunk, parse_mode=ParseMode.HTML, reply_markup=kb)
+        except Exception as e:
+            logger.warning(f"Ошибка отправки сообщения в формате HTML: {e}. Отправка в plain text...")
+            raw_chunks = split_telegram_chunks(text)
+            raw_chunk = raw_chunks[i] if i < len(raw_chunks) else text
+            await message.answer(raw_chunk, parse_mode=None, reply_markup=kb)
+

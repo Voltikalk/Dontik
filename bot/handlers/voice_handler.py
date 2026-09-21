@@ -15,6 +15,7 @@ from bot.keyboards.inline import get_entry_confirm_keyboard, get_tasks_keyboard
 from bot.handlers.states import GarageEntryState
 from bot.services.draft_store import save_draft
 from bot.services.assistant import answer_query
+from bot.services.formatters import send_formatted_message
 
 logger = logging.getLogger(__name__)
 
@@ -205,7 +206,7 @@ async def handle_voice_entry(message: Message, bot: Bot, state: FSMContext):
                     await assistant_wait_msg.delete()
                 except Exception:
                     pass
-                await message.answer(answer, parse_mode=None)
+                await send_formatted_message(message, answer)
             except Exception as err:
                 logger.error(f"Ошибка при формировании ответа ассистента: {err}", exc_info=True)
                 try:
@@ -224,7 +225,7 @@ async def handle_voice_entry(message: Message, bot: Bot, state: FSMContext):
                         await assistant_wait_msg.delete()
                     except Exception:
                         pass
-                    await message.answer(answer, parse_mode=None)
+                    await send_formatted_message(message, answer)
                 except Exception:
                     try:
                         await assistant_wait_msg.delete()

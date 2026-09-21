@@ -12,6 +12,7 @@ from bot.services.assistant import answer_query
 from bot.services.draft_store import save_draft
 from bot.handlers.voice_handler import format_markdown_card
 from bot.handlers.states import GarageEntryState
+from bot.services.formatters import send_formatted_message
 
 logger = logging.getLogger(__name__)
 
@@ -265,7 +266,7 @@ async def handle_text_message(message: Message, state: FSMContext):
                 await status_msg.delete()
             except Exception:
                 pass
-            await message.answer(answer, parse_mode=None)
+            await send_formatted_message(message, answer)
         except Exception as e:
             logger.error(f"Ошибка ассистента при текстовом запросе: {e}", exc_info=True)
             try:
@@ -283,7 +284,7 @@ async def handle_text_message(message: Message, state: FSMContext):
                 await status_msg.delete()
             except Exception:
                 pass
-            await message.answer(answer, parse_mode=None)
+            await send_formatted_message(message, answer)
         except Exception:
             try:
                 await status_msg.delete()
