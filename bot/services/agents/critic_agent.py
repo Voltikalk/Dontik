@@ -4,6 +4,7 @@ from openai import AsyncOpenAI
 
 from bot.config import settings
 from .base_agent import BaseAgent, AgentResult
+from .llm_helper import call_subagent_llm
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +48,6 @@ class CriticAgent(BaseAgent):
 
         drafts_summary = context.get("drafts_summary", "")
 
-        client = AsyncOpenAI(base_url="https://api.groq.com/openai/v1", api_key=settings.GROQ_API_KEY)
-
         user_content = (
             f"Основная задача пользователя: {task}\n\n"
             f"--- ПРЕДВАРИТЕЛЬНЫЕ РЕЗУЛЬТАТЫ СУБАГЕНТОВ ДЛЯ АУДИТА ---\n"
@@ -58,20 +57,12 @@ class CriticAgent(BaseAgent):
             "Найди скрытые риски, нестыковки, пропущенные мелочи, скрытые расходы и дай критические исправления."
         )
 
-        try:
-            resp = await client.chat.completions.create(
-                model=settings.GROQ_MODEL,
-                messages=[
-                    {"role": "system", "content": CRITIC_PROMPT},
-                    {"role": "user", "content": user_content}
-                ],
-                temperature=0.2,
-                max_tokens=1400
-            )
-            summary = resp.choices[0].message.content or "Критический анализ не выявил дополнительных рисков."
-        except Exception as e:
-            logger.error(f"[{self.name}] Ошибка критического анализа: {e}")
-            summary = f"Аудит рисков завершился с предупреждением: {e}"
+        summary = await call_subagent_llm(
+            system_prompt=CRITIC_PROMPT,
+            user_prompt=user_content,
+            temperature=0.2,
+            max_tokens=750
+        )
 
         return AgentResult(
             agent_name=self.name,

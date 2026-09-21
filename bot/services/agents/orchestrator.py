@@ -10,6 +10,7 @@ from .tech_expert_agent import TechExpertAgent
 from .doc_finance_agent import DocFinanceAgent
 from .planner_agent import PlannerAgent
 from .critic_agent import CriticAgent
+from .llm_helper import call_subagent_llm
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ SYNTHESIS_PROMPT = """Ты — главный Агент-Оркестратор 
 ПРАВИЛА ОФОРМЛЕНИЯ:
 - Красивое разделение блоков через эмодзи и заголовки.
 - Выделение важных сумм, артикулов и терминов жирным шрифтом (**жирный текст**).
+- Не используй широкие markdown-таблицы с символами (|). Telegram не поддерживает таблицы, они ломаются. Оформляй списки через аккуратные маркеры (• **Позиция**: цена, параметры).
 - Никакого сырого LaTeX, используй понятные символы Unicode (², ³, √, ±, ≈).
 - Пиши на живом, уверенном русском языке без канцелярщины.
 """
@@ -172,30 +174,30 @@ class MultiAgentOrchestrator:
             "Дай четкие рекомендации, сводку цен, ключевые этапы и предостережения."
         )
 
-        client = AsyncOpenAI(base_url="https://api.groq.com/openai/v1", api_key=settings.GROQ_API_KEY)
         try:
-            resp = await client.chat.completions.create(
-                model=settings.GROQ_MODEL,
-                messages=[
-                    {"role": "system", "content": SYNTHESIS_PROMPT},
-                    {"role": "user", "content": user_prompt}
-                ],
+            final_report = await call_subagent_llm(
+                system_prompt=SYNTHESIS_PROMPT,
+                user_prompt=user_prompt,
                 temperature=0.3,
-                max_tokens=2200
+                max_tokens=1200,
+                preferred_model="openai/gpt-oss-120b"
             )
-            final_report = resp.choices[0].message.content or ""
+            # Если вернулась ошибка о перегрузке, формируем красивый сводный отчет из ответов субагентов
+            if "временной перегрузки серверов" in final_report or not final_report.strip():
+                final_report = "**Итоги работы субагентов:**\n\n" + "\n\n".join(res.to_formatted_block() for res in results.values())
         except Exception as e:
             logger.error(f"[Orchestrator] Ошибка синтеза: {e}")
-            final_report = "<b>Итоги работы субагентов:</b>\n\n" + "\n\n".join(res.to_formatted_block() for res in results.values())
+            final_report = "**Итоги работы субагентов:**\n\n" + "\n\n".join(res.to_formatted_block() for res in results.values())
 
-        # Добавляем блок использованных источников
-        unique_sources = list(dict.fromkeys(all_sources))[:4]
+        # Добавляем блок проверенных источников (исключаем технические ссылки groq/api)
+        clean_sources = [s for s in all_sources if "groq.com" not in s and "openai.com" not in s]
+        unique_sources = list(dict.fromkeys(clean_sources))[:4]
         if unique_sources:
             sources_str = "\n".join(f"• {s}" for s in unique_sources)
-            final_report += f"\n\n🔗 <b>Источники и ориентиры цен:</b>\n{sources_str}"
+            final_report += f"\n\n🔗 **Источники и ориентиры цен:**\n{sources_str}"
 
         # Добавляем плашку задействованных агентов
         active_badges = " | ".join(f"{res.emoji} {res.agent_name}" for res in results.values())
-        final_report = f"🤖 <b>Команда субагентов:</b> [{active_badges}]\n\n" + final_report
+        final_report = f"🤖 **Команда субагентов:** [{active_badges}]\n\n" + final_report
 
         return final_report

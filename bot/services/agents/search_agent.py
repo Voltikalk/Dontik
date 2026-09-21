@@ -55,27 +55,19 @@ class SearchAnalystAgent(BaseAgent):
         search_text = "\n\n".join(snippets) if snippets else "По прямому запросу данных в поисковике не найдено."
 
         # 3. Анализируем через LLM
-        client = AsyncOpenAI(base_url="https://api.groq.com/openai/v1", api_key=settings.GROQ_API_KEY)
+        from .llm_helper import call_subagent_llm
         user_prompt = (
             f"Задача пользователя: {task}\n\n"
             f"--- НАЙДЕННЫЕ МАТЕРИАЛЫ В СЕТИ ---\n{search_text}\n-----------------------------------\n"
             "Подготовь четкую аналитическую сводку по ценам, артикулам, поставщикам и вариантам."
         )
 
-        try:
-            resp = await client.chat.completions.create(
-                model=settings.GROQ_MODEL,
-                messages=[
-                    {"role": "system", "content": SEARCH_AGENT_PROMPT},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.3,
-                max_tokens=1200
-            )
-            summary = resp.choices[0].message.content or "Не удалось сформировать сводку."
-        except Exception as e:
-            logger.error(f"[{self.name}] Ошибка LLM анализа: {e}")
-            summary = f"Собраны ссылки из поиска. Ошибка анализа: {e}"
+        summary = await call_subagent_llm(
+            system_prompt=SEARCH_AGENT_PROMPT,
+            user_prompt=user_prompt,
+            temperature=0.3,
+            max_tokens=750
+        )
 
         return AgentResult(
             agent_name=self.name,

@@ -4,6 +4,7 @@ from openai import AsyncOpenAI
 
 from bot.config import settings
 from .base_agent import BaseAgent, AgentResult
+from .llm_helper import call_subagent_llm
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +17,8 @@ DOC_FINANCE_PROMPT = """Ты — субагент финансовой эксп�
 5. Итоговый структурированный бюджет с точной суммой или вилкой цен.
 
 ФОРМАТИРОВАНИЕ:
-- Используй понятные таблицы или списки с суммами в рублях (₽).
+- Оформляй позиции четким маркированным списком (не строй широкие markdown-таблицы с символами |):
+  • **Позиция**: бренд/артикул — 1 500 ₽ (комментарий)
 - Выделяй итоговые суммы жирным (**Итого: 15 400 ₽**).
 - Никакого сырого LaTeX кода, используй простые символы (², ³, ≈, ·).
 """
@@ -39,28 +41,18 @@ class DocFinanceAgent(BaseAgent):
         doc_data = context.get("doc_data", "")
         search_summary = context.get("search_summary", "")
 
-        client = AsyncOpenAI(base_url="https://api.groq.com/openai/v1", api_key=settings.GROQ_API_KEY)
-
         user_content = f"Финансовая задача / расчет: {task}"
         if doc_data:
             user_content += f"\n\n--- ДАННЫЕ ИЗ ДОКУМЕНТА/СМЕТЫ ---\n{doc_data[:4000]}"
         if search_summary:
             user_content += f"\n\n--- ОРИЕНТИРЫ РЫНОЧНЫХ ЦЕН ---\n{search_summary[:2000]}"
 
-        try:
-            resp = await client.chat.completions.create(
-                model=settings.GROQ_MODEL,
-                messages=[
-                    {"role": "system", "content": DOC_FINANCE_PROMPT},
-                    {"role": "user", "content": user_content}
-                ],
-                temperature=0.2,
-                max_tokens=1400
-            )
-            summary = resp.choices[0].message.content or "Не удалось рассчитать смету."
-        except Exception as e:
-            logger.error(f"[{self.name}] Ошибка финансового анализа: {e}")
-            summary = f"Ошибка финансового анализа: {e}"
+        summary = await call_subagent_llm(
+            system_prompt=DOC_FINANCE_PROMPT,
+            user_prompt=user_content,
+            temperature=0.2,
+            max_tokens=750
+        )
 
         return AgentResult(
             agent_name=self.name,

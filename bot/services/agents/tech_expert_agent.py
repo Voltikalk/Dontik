@@ -4,6 +4,7 @@ from openai import AsyncOpenAI
 
 from bot.config import settings
 from .base_agent import BaseAgent, AgentResult
+from .llm_helper import call_subagent_llm
 
 logger = logging.getLogger(__name__)
 
@@ -36,26 +37,16 @@ class TechExpertAgent(BaseAgent):
         context = context or {}
 
         extra_info = context.get("extra_info", "")
-        client = AsyncOpenAI(base_url="https://api.groq.com/openai/v1", api_key=settings.GROQ_API_KEY)
-
         user_content = f"Техническая задача: {task}"
         if extra_info:
             user_content += f"\nДополнительные вводные:\n{extra_info}"
 
-        try:
-            resp = await client.chat.completions.create(
-                model=settings.GROQ_MODEL,
-                messages=[
-                    {"role": "system", "content": TECH_EXPERT_PROMPT},
-                    {"role": "user", "content": user_content}
-                ],
-                temperature=0.3,
-                max_tokens=1400
-            )
-            summary = resp.choices[0].message.content or "Не удалось сформировать техническое заключение."
-        except Exception as e:
-            logger.error(f"[{self.name}] Ошибка технического анализа: {e}")
-            summary = f"Ошибка технического анализа: {e}"
+        summary = await call_subagent_llm(
+            system_prompt=TECH_EXPERT_PROMPT,
+            user_prompt=user_content,
+            temperature=0.3,
+            max_tokens=750
+        )
 
         return AgentResult(
             agent_name=self.name,

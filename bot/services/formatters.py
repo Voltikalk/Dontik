@@ -4,7 +4,7 @@ import html as py_html
 from typing import Dict, Any, List
 from aiogram import html
 from aiogram.enums import ParseMode
-from aiogram.types import Message
+from aiogram.types import Message, LinkPreviewOptions
 
 from bot.database.models import FuelLog, ServiceLog, ItemLocation
 
@@ -301,16 +301,77 @@ def convert_latex_math(text: str) -> str:
     return text
 
 
+def convert_markdown_tables(text: str) -> str:
+    """
+    Преобразует Markdown-таблицы (| col1 | col2 |) в аккуратный читаемый список для Telegram,
+    убирая сырые разделители |---| и делая текст чистым и понятным.
+    """
+    lines = text.split("\n")
+    new_lines = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.strip().startswith("|") and line.strip().endswith("|"):
+            table_lines = []
+            while i < len(lines) and lines[i].strip().startswith("|") and lines[i].strip().endswith("|"):
+                table_lines.append(lines[i].strip())
+                i += 1
+
+            if len(table_lines) >= 2:
+                parsed_rows = []
+                for t_line in table_lines:
+                    clean = t_line.strip("|")
+                    cells = [c.strip() for c in clean.split("|")]
+                    # Пропускаем строки-разделители вида |:---|:---:|---|
+                    if all(re.match(r'^:?-+:?$', c) for c in cells if c):
+                        continue
+                    if any(cells):
+                        parsed_rows.append(cells)
+
+                if parsed_rows:
+                    headers = parsed_rows[0]
+                    data_rows = parsed_rows[1:]
+                    formatted_table = []
+                    for row in data_rows:
+                        item_name = row[0] if len(row) > 0 else ""
+                        other_parts = []
+                        for col_idx in range(1, len(row)):
+                            val = row[col_idx]
+                            if val and val != "-":
+                                other_parts.append(val)
+
+                        details_str = " | ".join(other_parts) if other_parts else ""
+                        if details_str:
+                            formatted_table.append(f"• **{item_name}**: {details_str}")
+                        else:
+                            formatted_table.append(f"• **{item_name}**")
+
+                    new_lines.append("\n".join(formatted_table))
+                    continue
+            else:
+                new_lines.extend(table_lines)
+                continue
+        else:
+            new_lines.append(line)
+            i += 1
+
+    return "\n".join(new_lines)
+
+
 def md_to_telegram_html(text: str) -> str:
     """
     Конвертирует Markdown и математику в валидный, красивый HTML для Telegram:
+    - Преобразует Markdown-таблицы в аккуратные списки.
     - Блоки формул и вычислений преобразует в аккуратные цитаты <blockquote><b>...</b></blockquote>.
     - Всю математическую нотацию (LaTeX, степени, корни, индексы) переводит в Unicode.
     - Блоки настоящего программного кода (python, bash, js и т.д.) оформляет в <pre><code class="language-...">.
-    - Обычный текст экранирует (py_html.escape) и форматирует жирным <b>, курсивом <i>, заголовками.
+    - Сохраняет уже имеющиеся валидные HTML-теги и экранирует спецсимволы.
     """
     if not text:
         return ""
+
+    # 0. Преобразуем неудобочитаемые таблицы Markdown в списки
+    text = convert_markdown_tables(text)
 
     code_blocks = []
     inline_codes = []
@@ -363,6 +424,14 @@ def md_to_telegram_html(text: str) -> str:
     # 6. Преобразуем любые оставшиеся LaTeX команды в обычном тексте (\sqrt{...}, \approx, x^2, x_1)
     text = convert_latex_math(text)
 
+    # 6.5. Сохраняем УЖЕ существующие валидные Telegram HTML теги (<b>, </b>, <i>, </i>, <code>, </code>, <blockquote>, </blockquote>, <a>, </a>)
+    valid_tags = []
+    def save_valid_tag(m):
+        valid_tags.append(m.group(0))
+        return f"XXVALIDTAG{len(valid_tags)-1}XX"
+
+    text = re.sub(r'</?(?:b|i|u|s|code|pre|blockquote|a)(?:\s+[^>]*?)?>', save_valid_tag, text, flags=re.IGNORECASE)
+
     # 7. Безопасно экранируем HTML символы (<, >, &) в оставшемся обычном тексте
     text = py_html.escape(text, quote=False)
 
@@ -379,6 +448,13 @@ def md_to_telegram_html(text: str) -> str:
 
     # 11. Цитаты (> цитата или &gt; цитата)
     text = re.sub(r'^[ \t]*(?:>|&gt;)\s*(.+)$', r'<blockquote>\1</blockquote>', text, flags=re.MULTILINE)
+
+    # 11.5. Восстанавливаем сохраненные исходные валидные HTML теги
+    def restore_valid_tag(m):
+        idx = int(m.group(1))
+        return valid_tags[idx]
+
+    text = re.sub(r'XXVALIDTAG(\d+)XX', restore_valid_tag, text)
 
     # 12. Восстанавливаем блоки формул в виде Telegram blockquote
     def restore_math_block(m):
@@ -468,10 +544,20 @@ async def send_formatted_message(message: Message, text: str, reply_markup=None)
         is_last = (i == len(chunks) - 1)
         kb = reply_markup if is_last else None
         try:
-            await message.answer(chunk, parse_mode=ParseMode.HTML, reply_markup=kb)
+            await message.answer(
+                chunk,
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb,
+                link_preview_options=LinkPreviewOptions(is_disabled=True)
+            )
         except Exception as e:
             logger.warning(f"Ошибка отправки сообщения в формате HTML: {e}. Отправка в plain text...")
             raw_chunks = split_telegram_chunks(text)
             raw_chunk = raw_chunks[i] if i < len(raw_chunks) else text
-            await message.answer(raw_chunk, parse_mode=None, reply_markup=kb)
+            await message.answer(
+                raw_chunk,
+                parse_mode=None,
+                reply_markup=kb,
+                link_preview_options=LinkPreviewOptions(is_disabled=True)
+            )
 

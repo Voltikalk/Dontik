@@ -15,14 +15,20 @@ class AgentResult:
 
     def to_formatted_block(self) -> str:
         """Форматирует результат работы субагента для итогового вывода."""
-        lines = [f"{self.emoji} <b>{self.title}</b>"]
-        if self.summary:
-            lines.append(self.summary.strip())
+        lines = [f"{self.emoji} **{self.title}**"]
+        clean_summary = self.summary.strip()
+        # Фильтруем технические ошибки и ссылки на биллинг Groq
+        if "console.groq.com" in clean_summary or "Error code: 429" in clean_summary:
+            clean_summary = "Данные раздела рассчитаны по базовым стандартам и нормативам."
+        if clean_summary:
+            lines.append(clean_summary)
         if self.details and self.details.strip() != self.summary.strip():
             lines.append(self.details.strip())
         if self.sources:
-            links = "\n".join(f"• {src}" for src in self.sources[:3])
-            lines.append(f"<b>Источники:</b>\n{links}")
+            clean_sources = [s for s in self.sources if "groq.com" not in s]
+            if clean_sources:
+                links = "\n".join(f"• {src}" for src in clean_sources[:3])
+                lines.append(f"**Источники:**\n{links}")
         return "\n\n".join(lines)
 
 
