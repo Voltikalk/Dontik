@@ -1,5 +1,6 @@
 import re
 import logging
+import html as py_html
 from typing import Dict, Any, List
 from aiogram import html
 from aiogram.enums import ParseMode
@@ -193,7 +194,7 @@ def md_to_telegram_html(text: str) -> str:
     text = re.sub(r'`[^`\n]+`', repl_block, text)
 
     # 5. Экранируем HTML символы в обычном тексте (<, >, &)
-    text = html.escape(text, quote=False)
+    text = py_html.escape(text, quote=False)
 
     # 6. Заголовки (#, ##, ###)
     text = re.sub(r'^[ \t]*#{1,6}\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
@@ -219,7 +220,7 @@ def md_to_telegram_html(text: str) -> str:
             lang_match = re.match(r'```([a-zA-Z0-9_\-]+)?\n?([\s\S]*?)```', raw)
             lang = lang_match.group(1).strip() if lang_match and lang_match.group(1) else ""
             code_content = lang_match.group(2) if lang_match else raw[3:-3]
-            code_esc = html.escape(code_content.strip(), quote=False)
+            code_esc = py_html.escape(code_content.strip(), quote=False)
             if lang:
                 return f'<pre><code class="language-{lang}">{code_esc}</code></pre>'
             return f'<pre>{code_esc}</pre>'
@@ -227,18 +228,18 @@ def md_to_telegram_html(text: str) -> str:
         # Блочный LaTeX $$...$$ или \[...\]
         elif raw.startswith("$$") or raw.startswith("\\["):
             body = raw[2:-2].strip()
-            math_esc = html.escape(body, quote=False)
+            math_esc = py_html.escape(body, quote=False)
             return f'<pre><code class="language-latex">{math_esc}</code></pre>'
 
         # Инлайн LaTeX $...$ или \(...\)
         elif raw.startswith("$") or raw.startswith("\\("):
             body = raw[2:-2].strip() if raw.startswith("\\(") else raw[1:-1].strip()
-            math_esc = html.escape(body, quote=False)
+            math_esc = py_html.escape(body, quote=False)
             return f'<code>{math_esc}</code>'
 
         # Инлайн код `...`
         elif raw.startswith("`"):
-            code_esc = html.escape(raw[1:-1], quote=False)
+            code_esc = py_html.escape(raw[1:-1], quote=False)
             return f'<code>{code_esc}</code>'
 
         return raw
