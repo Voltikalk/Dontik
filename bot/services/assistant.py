@@ -39,10 +39,11 @@ ASSISTANT_SYSTEM_PROMPT = """Ты — универсальный персона�
 
 
 def get_groq_client() -> AsyncOpenAI:
-    """Создает экземпляр AsyncOpenAI клиента для Groq API."""
+    """Создает экземпляр AsyncOpenAI клиента для Groq API без блокирующих ретраев."""
     return AsyncOpenAI(
         base_url="https://api.groq.com/openai/v1",
-        api_key=settings.GROQ_API_KEY
+        api_key=settings.GROQ_API_KEY,
+        max_retries=0
     )
 
 
@@ -97,18 +98,16 @@ async def answer_query(
     messages.append({"role": "user", "content": prompt_content})
 
     client = get_groq_client()
-    candidate_models = [settings.GROQ_MODEL]
-    for fallback in ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b", "groq/compound-mini"]:
-        if fallback not in candidate_models:
-            candidate_models.append(fallback)
+    candidate_models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
 
     for model_name in candidate_models:
         try:
+            req_tokens = 750 if "qwen" in model_name else 1400
             response = await client.chat.completions.create(
                 model=model_name,
                 messages=messages,
-                temperature=0.4,
-                max_tokens=2048
+                temperature=0.3,
+                max_tokens=req_tokens
             )
             content = response.choices[0].message.content or ""
             if content.strip():
@@ -117,12 +116,12 @@ async def answer_query(
             err_str = str(e)
             logger.warning(f"Модель {model_name} вернула ошибку при ответе ассистента: {e}")
 
-            # Если превышен лимит токенов (413 / Request too large / ITPM)
-            if any(term in err_str.lower() for term in ["413", "too large", "rate_limit_exceeded", "limit 7000", "itpm"]):
+            # Если превышен лимит входных токенов (413 / Request too large / ITPM)
+            if any(term in err_str.lower() for term in ["413", "too large", "limit 7000", "itpm"]):
                 logger.info("Аварийное сжатие контекста запроса для обхода лимита токенов Groq...")
                 short_prompt = prompt_content
-                if len(short_prompt) > 3500:
-                    short_prompt = short_prompt[:3500] + "\n\n... [данные сокращены по лимиту нейросети]"
+                if len(short_prompt) > 3000:
+                    short_prompt = short_prompt[:3000] + "\n\n... [данные сокращены по лимиту нейросети]"
                 compressed_messages = [
                     {"role": "system", "content": ASSISTANT_SYSTEM_PROMPT},
                     {"role": "user", "content": short_prompt}
@@ -131,8 +130,8 @@ async def answer_query(
                     retry_resp = await client.chat.completions.create(
                         model=model_name,
                         messages=compressed_messages,
-                        temperature=0.4,
-                        max_tokens=1500
+                        temperature=0.3,
+                        max_tokens=700
                     )
                     retry_content = retry_resp.choices[0].message.content or ""
                     if retry_content.strip():

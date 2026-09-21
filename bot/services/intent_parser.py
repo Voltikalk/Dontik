@@ -64,10 +64,11 @@ SYSTEM_PROMPT = """Ты — интеллектуальный персональ�
 
 
 def get_groq_client() -> AsyncOpenAI:
-    """Создает экземпляр AsyncOpenAI клиента для Groq API."""
+    """Создает экземпляр AsyncOpenAI клиента для Groq API без блокирующих ретраев."""
     return AsyncOpenAI(
         base_url="https://api.groq.com/openai/v1",
-        api_key=settings.GROQ_API_KEY
+        api_key=settings.GROQ_API_KEY,
+        max_retries=0
     )
 
 
@@ -76,14 +77,11 @@ async def parse_user_intent(text: str, context: Optional[str] = None) -> Dict[st
     Парсит текст пользователя через Groq LLM в строгий JSON.
     Принимает опциональный контекст последних реплик для точного разрешения местоимений
     ("а для 50?", "почему так?", "запиши это").
-    Использует qwen/qwen3.8-27b с автоматическим fallback на gpt-oss-120b.
+    Использует сверхбыстрый gpt-oss-120b с автоматическим fallback на 20b и qwen.
     """
     client = get_groq_client()
 
-    candidate_models = [settings.GROQ_MODEL]
-    for fallback in ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b", "groq/compound-mini"]:
-        if fallback not in candidate_models:
-            candidate_models.append(fallback)
+    candidate_models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     if context:
@@ -99,7 +97,8 @@ async def parse_user_intent(text: str, context: Optional[str] = None) -> Dict[st
                 model=model_name,
                 messages=messages,
                 response_format={"type": "json_object"},
-                temperature=0.1
+                temperature=0.1,
+                max_tokens=250
             )
 
             content = response.choices[0].message.content or "{}"

@@ -75,9 +75,11 @@ async def cmd_check_mail(message: Message):
                 f"Текст:\n{em['body']}\n"
             )
 
-        full_raw_text = "\n".join(email_items_text)
-
-        client = AsyncOpenAI(base_url="https://api.groq.com/openai/v1", api_key=settings.GROQ_API_KEY)
+        client = AsyncOpenAI(
+            base_url="https://api.groq.com/openai/v1",
+            api_key=settings.GROQ_API_KEY,
+            max_retries=0
+        )
         resp = await client.chat.completions.create(
             model=settings.GROQ_MODEL,
             messages=[

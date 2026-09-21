@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     ALLOWED_TELEGRAM_IDS: Union[List[int], str] = []
 
     DATABASE_URL: str = "sqlite+aiosqlite:///data/garage.db"
-    GROQ_MODEL: str = "qwen/qwen3.8-27b"
+    GROQ_MODEL: str = "openai/gpt-oss-120b"
     GROQ_WHISPER_MODEL: str = "whisper-large-v3-turbo"
 
     # Коннектор почты (IMAP / SMTP)

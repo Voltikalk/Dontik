@@ -63,7 +63,8 @@ class GroqService:
         if self._client is None:
             self._client = AsyncOpenAI(
                 api_key=settings.GROQ_API_KEY,
-                base_url="https://api.groq.com/openai/v1"
+                base_url="https://api.groq.com/openai/v1",
+                max_retries=0
             )
         return self._client
 

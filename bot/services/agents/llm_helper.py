@@ -19,7 +19,11 @@ async def call_subagent_llm(
     Надежный вызов LLM для субагентов с защитой от лимитов токенов (1000 OTPM у qwen)
     и автоматическим переключением на резервные модели.
     """
-    client = AsyncOpenAI(base_url="https://api.groq.com/openai/v1", api_key=settings.GROQ_API_KEY)
+    client = AsyncOpenAI(
+        base_url="https://api.groq.com/openai/v1",
+        api_key=settings.GROQ_API_KEY,
+        max_retries=0
+    )
 
     # Гарантируем, что max_tokens не превышает лимит вывода на тарифе On-Demand (1000 OTPM)
     safe_max_tokens = min(max_tokens, 750)
@@ -28,7 +32,7 @@ async def call_subagent_llm(
     models = []
     if preferred_model:
         models.append(preferred_model)
-    for m in [settings.GROQ_MODEL, "openai/gpt-oss-120b", "openai/gpt-oss-20b"]:
+    for m in ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]:
         if m not in models:
             models.append(m)
 
