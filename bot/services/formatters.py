@@ -301,10 +301,21 @@ def convert_latex_math(text: str) -> str:
     return text
 
 
+def strip_md_wrapping(s: str) -> str:
+    """Очищает текст от внешних звездочек и подчеркиваний жирного/курсива."""
+    s = s.strip()
+    s = re.sub(r'^\*\*(.*?)\*\*$', r'\1', s).strip()
+    s = re.sub(r'^__(.*?)__$', r'\1', s).strip()
+    return s
+
+
 def convert_markdown_tables(text: str) -> str:
     """
-    Преобразует Markdown-таблицы (| col1 | col2 |) в аккуратный читаемый список для Telegram,
-    убирая сырые разделители |---| и делая текст чистым и понятным.
+    Интеллектуально преобразует Markdown-таблицы в аккуратный, структурированный вид для Telegram:
+    - Распознает нумерованные списки (колонки №, #, ID) и превращает их в пункты «1. **Название**» с подпунктами.
+    - Двухколоночные таблицы преобразует в компактный список «• **Параметр:** Значение».
+    - Многоколоночные таблицы оформляет аккуратными карточками с маркерами колонок.
+    - Полностью исключает нечитаемые вертикальные палочки (|) и разделители.
     """
     lines = text.split("\n")
     new_lines = []
@@ -322,31 +333,58 @@ def convert_markdown_tables(text: str) -> str:
                 for t_line in table_lines:
                     clean = t_line.strip("|")
                     cells = [c.strip() for c in clean.split("|")]
-                    # Пропускаем строки-разделители вида |:---|:---:|---|
                     if all(re.match(r'^:?-+:?$', c) for c in cells if c):
                         continue
                     if any(cells):
                         parsed_rows.append(cells)
 
                 if parsed_rows:
-                    headers = parsed_rows[0]
+                    headers = [strip_md_wrapping(h) for h in parsed_rows[0]]
                     data_rows = parsed_rows[1:]
-                    formatted_table = []
+
+                    first_header_lower = headers[0].lower() if headers else ""
+                    is_first_col_num = (
+                        first_header_lower in {"№", "#", "n", "n°", "номер", "item", "id", "count", "п/п", "№ п/п"} or
+                        all(re.match(r'^\*{0,2}\d+[\.\)]?\*{0,2}$', r[0].strip()) for r in data_rows if r)
+                    )
+
+                    formatted_items = []
                     for row in data_rows:
-                        item_name = row[0] if len(row) > 0 else ""
-                        other_parts = []
-                        for col_idx in range(1, len(row)):
-                            val = row[col_idx]
-                            if val and val != "-":
-                                other_parts.append(val)
+                        if not any(row):
+                            continue
 
-                        details_str = " | ".join(other_parts) if other_parts else ""
-                        if details_str:
-                            formatted_table.append(f"• **{item_name}**: {details_str}")
+                        if is_first_col_num and len(row) > 1:
+                            num = strip_md_wrapping(row[0]).rstrip(".")
+                            title = strip_md_wrapping(row[1])
+                            lead = f"{num}. **{title}**"
+                            rem_start = 2
+                        elif len(row) == 2:
+                            key = strip_md_wrapping(row[0])
+                            val = strip_md_wrapping(row[1])
+                            formatted_items.append(f"• **{key}:** {val}")
+                            continue
                         else:
-                            formatted_table.append(f"• **{item_name}**")
+                            title = strip_md_wrapping(row[0])
+                            lead = f"• **{title}**"
+                            rem_start = 1
 
-                    new_lines.append("\n".join(formatted_table))
+                        sub_points = []
+                        for col_idx in range(rem_start, len(row)):
+                            val = row[col_idx].strip()
+                            if not val or val == "-":
+                                continue
+                            h_name = headers[col_idx] if col_idx < len(headers) else ""
+                            if h_name:
+                                sub_points.append(f"   • **{h_name}:** {val}")
+                            else:
+                                sub_points.append(f"   • {val}")
+
+                        if sub_points:
+                            formatted_items.append(lead + "\n" + "\n".join(sub_points))
+                        else:
+                            formatted_items.append(lead)
+
+                    new_lines.append("\n\n".join(formatted_items))
                     continue
             else:
                 new_lines.extend(table_lines)
@@ -361,16 +399,16 @@ def convert_markdown_tables(text: str) -> str:
 def md_to_telegram_html(text: str) -> str:
     """
     Конвертирует Markdown и математику в валидный, красивый HTML для Telegram:
-    - Преобразует Markdown-таблицы в аккуратные списки.
+    - Преобразует Markdown-таблицы в аккуратные списки без палочек.
     - Блоки формул и вычислений преобразует в аккуратные цитаты <blockquote><b>...</b></blockquote>.
-    - Всю математическую нотацию (LaTeX, степени, корни, индексы) переводит в Unicode.
+    - Всю математическую нотацию (LaTeX, степени, корни, индексы) переводит в Unicode внутри формул.
     - Блоки настоящего программного кода (python, bash, js и т.д.) оформляет в <pre><code class="language-...">.
     - Сохраняет уже имеющиеся валидные HTML-теги и экранирует спецсимволы.
     """
     if not text:
         return ""
 
-    # 0. Преобразуем неудобочитаемые таблицы Markdown в списки
+    # 0. Преобразуем неудобочитаемые таблицы Markdown в красивые списки
     text = convert_markdown_tables(text)
 
     code_blocks = []
@@ -421,10 +459,7 @@ def md_to_telegram_html(text: str) -> str:
     text = re.sub(r'(?<!\$)\$(?!\$)([^$\n]+)(?<!\$)\$(?!\$)', save_inline_math, text)
     text = re.sub(r'\\\((.+?)\\\)', save_inline_math, text)
 
-    # 6. Преобразуем любые оставшиеся LaTeX команды в обычном тексте (\sqrt{...}, \approx, x^2, x_1)
-    text = convert_latex_math(text)
-
-    # 6.5. Сохраняем УЖЕ существующие валидные Telegram HTML теги (<b>, </b>, <i>, </i>, <code>, </code>, <blockquote>, </blockquote>, <a>, </a>)
+    # 6. Сохраняем УЖЕ существующие валидные Telegram HTML теги (<b>, </b>, <i>, </i>, <code>, </code>, <blockquote>, </blockquote>, <a>, </a>)
     valid_tags = []
     def save_valid_tag(m):
         valid_tags.append(m.group(0))
@@ -438,18 +473,21 @@ def md_to_telegram_html(text: str) -> str:
     # 8. Заголовки (#, ##, ###)
     text = re.sub(r'^[ \t]*#{1,6}\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
 
-    # 9. Жирный текст (**жирный** или __жирный__)
-    text = re.sub(r'\*\*([^*]+)\*\*', r'<b>\1</b>', text)
-    text = re.sub(r'__([^_]+)__', r'<b>\1</b>', text)
+    # 9. Жирный + курсив (***текст***)
+    text = re.sub(r'\*\*\*([^\n*]+?)\*\*\*', r'<b><i>\1</i></b>', text)
 
-    # 10. Курсив (*курсив* или _курсив_)
-    text = re.sub(r'(?<!\w)\*([^*]+)\*(?!\w)', r'<i>\1</i>', text)
-    text = re.sub(r'(?<!\w)_([^_]+)_(?!\w)', r'<i>\1</i>', text)
+    # 10. Жирный текст (**жирный** или __жирный__)
+    text = re.sub(r'\*\*([^\n*]+?)\*\*', r'<b>\1</b>', text)
+    text = re.sub(r'__([^\n_]+?)__', r'<b>\1</b>', text)
 
-    # 11. Цитаты (> цитата или &gt; цитата)
+    # 11. Курсив (*курсив* или _курсив_) - не триггерится внутри snake_case идентификаторов
+    text = re.sub(r'(?<!\*)\*([^\n*]+?)\*(?!\*)', r'<i>\1</i>', text)
+    text = re.sub(r'(?<![a-zA-Z0-9_])_([^\n_]+?)_(?![a-zA-Z0-9_])', r'<i>\1</i>', text)
+
+    # 12. Цитаты (> цитата или &gt; цитата)
     text = re.sub(r'^[ \t]*(?:>|&gt;)\s*(.+)$', r'<blockquote>\1</blockquote>', text, flags=re.MULTILINE)
 
-    # 11.5. Восстанавливаем сохраненные исходные валидные HTML теги
+    # 13. Восстанавливаем сохраненные исходные валидные HTML теги
     def restore_valid_tag(m):
         idx = int(m.group(1))
         return valid_tags[idx]
