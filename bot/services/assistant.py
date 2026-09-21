@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+from typing import Optional, List, Dict
 from openai import AsyncOpenAI
 
 from bot.config import settings
@@ -49,10 +49,12 @@ def get_groq_client() -> AsyncOpenAI:
 async def answer_query(
     user_query: str,
     needs_web: bool = False,
-    search_query: Optional[str] = None
+    search_query: Optional[str] = None,
+    history: Optional[List[Dict[str, str]]] = None
 ) -> str:
     """
     Генерирует ответ ассистента на произвольный вопрос пользователя.
+    Поддерживает контекст предыдущих реплик диалога (history).
     При необходимости выполняет веб-поиск через DuckDuckGo и передает результаты в LLM.
     """
     web_context = ""
@@ -75,13 +77,24 @@ async def answer_query(
                 + "\n--------------------------------------------------------\n"
             )
 
-    # Формирование сообщений для модели
+    # Текущий запрос пользователя
     prompt_content = f"Вопрос пользователя: {user_query}"
     if web_context:
         prompt_content += (
             f"\n\n{web_context}\n"
             "Используй приведенные выше данные из интернета, чтобы дать актуальный и точный ответ на вопрос пользователя."
         )
+
+    # Формирование сообщений с историей диалога
+    messages = [{"role": "system", "content": ASSISTANT_SYSTEM_PROMPT}]
+    if history:
+        for item in history:
+            role = item.get("role")
+            content = item.get("content", "").strip()
+            if role in ["user", "assistant"] and content:
+                messages.append({"role": role, "content": content})
+
+    messages.append({"role": "user", "content": prompt_content})
 
     client = get_groq_client()
     candidate_models = [settings.GROQ_MODEL]
@@ -93,12 +106,9 @@ async def answer_query(
         try:
             response = await client.chat.completions.create(
                 model=model_name,
-                messages=[
-                    {"role": "system", "content": ASSISTANT_SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt_content}
-                ],
+                messages=messages,
                 temperature=0.4,
-                max_tokens=1024
+                max_tokens=2048
             )
             content = response.choices[0].message.content or ""
             if content.strip():

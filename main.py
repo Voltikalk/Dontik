@@ -28,8 +28,9 @@ async def setup_bot_commands(bot: Bot) -> None:
         BotCommand(command="tasks", description="📋 Список дел и задач"),
         BotCommand(command="stats", description="📊 Сводка: авто, заправки, ТО"),
         BotCommand(command="items", description="📦 Вещи в гараже/на даче"),
+        BotCommand(command="clear", description="🔄 Сбросить контекст диалога"),
         BotCommand(command="help", description="💡 Справка и примеры команд"),
-        BotCommand(command="start", description="🔄 Главное меню"),
+        BotCommand(command="start", description="🚀 Главное меню"),
     ]
     await bot.set_my_commands(commands=commands, scope=BotCommandScopeDefault())
     logger.info("Список команд успешно установлен в строке ввода бота.")

@@ -23,6 +23,7 @@ class User(Base):
     service_logs: Mapped[List["ServiceLog"]] = relationship("ServiceLog", back_populates="user", cascade="all, delete-orphan")
     item_locations: Mapped[List["ItemLocation"]] = relationship("ItemLocation", back_populates="user", cascade="all, delete-orphan")
     tasks: Mapped[List["Task"]] = relationship("Task", back_populates="user", cascade="all, delete-orphan")
+    chat_history: Mapped[List["ChatHistory"]] = relationship("ChatHistory", back_populates="user", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:
         return f"<User(telegram_id={self.telegram_id}, full_name='{self.full_name}', is_admin={self.is_admin})>"
@@ -99,4 +100,22 @@ class Task(Base):
 
     def __repr__(self) -> str:
         return f"<Task(id={self.id}, title='{self.title[:30]}', due_date='{self.due_date}', is_completed={self.is_completed})>"
+
+
+class ChatHistory(Base):
+    """Модель истории сообщений диалога с ассистентом (для поддержки контекста)."""
+    __tablename__ = "chat_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)  # "user" или "assistant"
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), nullable=False)
+
+    # Relationship
+    user: Mapped["User"] = relationship("User", back_populates="chat_history")
+
+    def __repr__(self) -> str:
+        return f"<ChatHistory(id={self.id}, user_id={self.user_id}, role='{self.role}', content='{self.content[:30]}...')>"
+
 

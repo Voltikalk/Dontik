@@ -160,10 +160,10 @@ async def cmd_help(message: Message):
         "• <i>«Какая погода завтра в Москве?»</i>\n"
         "• <i>«Найди актуальный курс доллара и евро»</i>\n"
         "• <i>«Сколько стоит резина 205/55 R16?»</i>\n\n"
-        "💡 <b>Вопросы и экспертные советы:</b>\n"
-        "• <i>«Как прокачать тормоза на классике?»</i>\n"
-        "• <i>«Сколько варить яйца всмятку?»</i>\n"
-        "• Любые другие вопросы по жизни, технике и быту!\n\n"
+        "💡 <b>Вопросы, математика и экспертные советы:</b>\n"
+        "• <i>«Реши уравнение x^2 = 38»</i>\n"
+        "• <i>«А почему два корня?»</i> (бот помнит контекст прошлых вопросов!)\n"
+        "• <i>«Как прокачать тормоза на классике?»</i>\n\n"
         "⛽ <b>Заправки автомобиля:</b>\n"
         "• <i>«Заправил сорок литров на 2500 рублей, пробег 155 000, Газпромнефть»</i>\n\n"
         "🔧 <b>Сервис и ремонты:</b>\n"
@@ -175,9 +175,24 @@ async def cmd_help(message: Message):
         "/tasks — актуальный список дел\n"
         "/stats — сводка по заправкам и ремонтам\n"
         "/items — каталог вещей в гараже\n"
-        "/start — перезапуск и приветствие"
+        "/clear — сбросить контекст диалога (начать заново)\n"
+        "/help — подробная справка\n"
+        "/start — главное меню"
     )
     await message.answer(text)
+
+
+@router.message(Command("clear"))
+@router.message(Command("reset"))
+async def cmd_clear_history(message: Message):
+    """
+    Обработчик команды /clear и /reset.
+    Очищает историю диалога пользователя (память контекста).
+    """
+    user_id = message.from_user.id
+    async with get_session() as session:
+        await crud.clear_chat_history(session, user_id=user_id)
+    await message.answer("🔄 <b>Память диалога очищена.</b>\nЗадавай новый вопрос — я готов к новой теме!")
 
 
 @router.message(F.text & ~F.text.startswith("/"))
@@ -185,7 +200,7 @@ async def handle_text_message(message: Message, state: FSMContext):
     """
     Универсальный обработчик обычных текстовых сообщений.
     Позволяет вводить задачи, вести учет расходов и задавать любые вопросы
-    текстом точно так же, как и голосом.
+    текстом точно так же, как и голосом, с полной поддержкой памяти диалога.
     """
     user_id = message.from_user.id
     raw_text = message.text.strip()
@@ -210,9 +225,20 @@ async def handle_text_message(message: Message, state: FSMContext):
     elif lowered in {"помощь", "справка", "help", "инструкция"}:
         await cmd_help(message)
         return
+    elif lowered in {"забудь", "сброс", "очисти диалог", "очисти контекст", "сбрось контекст", "начнем заново", "очистить память", "забудь все"}:
+        await cmd_clear_history(message)
+        return
 
-    # 2. Интеллектуальный разбор интента через Groq LLM
-    parsed = await parse_user_intent(raw_text)
+    # 2. Загрузка недавней истории диалога для контекста
+    async with get_session() as session:
+        history = await crud.get_recent_chat_history(session, user_id=user_id, limit=8)
+
+    context_str = None
+    if history:
+        context_str = "\n".join([f"{h['role']}: {h['content'][:250]}" for h in history[-4:]])
+
+    # 3. Интеллектуальный разбор интента через Groq LLM с учетом контекста
+    parsed = await parse_user_intent(raw_text, context=context_str)
     intent = parsed.get("intent", "unknown")
     data = parsed.get("data", {})
 
@@ -261,12 +287,23 @@ async def handle_text_message(message: Message, state: FSMContext):
         status_text = "🔍 <i>Ищу актуальную информацию в интернете...</i>" if needs_web else "🤔 <i>Думаю над ответом...</i>"
         status_msg = await message.answer(status_text)
         try:
-            answer = await answer_query(user_query=user_query, needs_web=needs_web, search_query=search_query)
+            answer = await answer_query(
+                user_query=user_query,
+                needs_web=needs_web,
+                search_query=search_query,
+                history=history
+            )
             try:
                 await status_msg.delete()
             except Exception:
                 pass
             await send_formatted_message(message, answer)
+
+            # Сохраняем диалог в память
+            async with get_session() as session:
+                await crud.add_chat_message(session, user_id=user_id, role="user", content=user_query)
+                await crud.add_chat_message(session, user_id=user_id, role="assistant", content=answer)
+
         except Exception as e:
             logger.error(f"Ошибка ассистента при текстовом запросе: {e}", exc_info=True)
             try:
@@ -279,18 +316,25 @@ async def handle_text_message(message: Message, state: FSMContext):
     else:
         status_msg = await message.answer("🤔 <i>Секунду...</i>")
         try:
-            answer = await answer_query(user_query=raw_text, needs_web=False)
+            answer = await answer_query(user_query=raw_text, needs_web=False, history=history)
             try:
                 await status_msg.delete()
             except Exception:
                 pass
             await send_formatted_message(message, answer)
+
+            # Сохраняем диалог в память
+            async with get_session() as session:
+                await crud.add_chat_message(session, user_id=user_id, role="user", content=raw_text)
+                await crud.add_chat_message(session, user_id=user_id, role="assistant", content=answer)
+
         except Exception:
             try:
                 await status_msg.delete()
             except Exception:
                 pass
             await message.answer("Я не совсем понял, что требуется сделать. Напиши вопрос подробнее или нажми /help.")
+
 
 
 

@@ -129,8 +129,16 @@ async def handle_voice_entry(message: Message, bot: Bot, state: FSMContext):
             await message.answer("🔇 Не удалось расслышать слова. Попробуй сказать еще раз чуть громче.")
             return
 
-        # Парсинг интента через Groq LLM
-        parsed_result = await parse_user_intent(transcript)
+        # Загрузка недавней истории диалога для понимания контекста
+        async with get_session() as session:
+            history = await crud.get_recent_chat_history(session, user_id=user_id, limit=8)
+
+        context_str = None
+        if history:
+            context_str = "\n".join([f"{h['role']}: {h['content'][:250]}" for h in history[-4:]])
+
+        # Парсинг интента через Groq LLM с учетом контекста
+        parsed_result = await parse_user_intent(transcript, context=context_str)
         intent = parsed_result.get("intent", "unknown")
         data = parsed_result.get("data", {})
 
@@ -201,12 +209,23 @@ async def handle_voice_entry(message: Message, bot: Bot, state: FSMContext):
             wait_text = "🔍 <i>Ищу информацию в интернете...</i>" if needs_web else "🤔 <i>Думаю над ответом...</i>"
             assistant_wait_msg = await message.answer(wait_text)
             try:
-                answer = await answer_query(user_query=user_query, needs_web=needs_web, search_query=search_query)
+                answer = await answer_query(
+                    user_query=user_query,
+                    needs_web=needs_web,
+                    search_query=search_query,
+                    history=history
+                )
                 try:
                     await assistant_wait_msg.delete()
                 except Exception:
                     pass
                 await send_formatted_message(message, answer)
+
+                # Сохраняем реплику и ответ в историю диалога
+                async with get_session() as session:
+                    await crud.add_chat_message(session, user_id=user_id, role="user", content=user_query)
+                    await crud.add_chat_message(session, user_id=user_id, role="assistant", content=answer)
+
             except Exception as err:
                 logger.error(f"Ошибка при формировании ответа ассистента: {err}", exc_info=True)
                 try:
@@ -220,12 +239,17 @@ async def handle_voice_entry(message: Message, bot: Bot, state: FSMContext):
             if transcript and len(transcript.strip()) > 3:
                 assistant_wait_msg = await message.answer("🤔 <i>Секунду...</i>")
                 try:
-                    answer = await answer_query(user_query=transcript, needs_web=False)
+                    answer = await answer_query(user_query=transcript, needs_web=False, history=history)
                     try:
                         await assistant_wait_msg.delete()
                     except Exception:
                         pass
                     await send_formatted_message(message, answer)
+
+                    async with get_session() as session:
+                        await crud.add_chat_message(session, user_id=user_id, role="user", content=transcript)
+                        await crud.add_chat_message(session, user_id=user_id, role="assistant", content=answer)
+
                 except Exception:
                     try:
                         await assistant_wait_msg.delete()

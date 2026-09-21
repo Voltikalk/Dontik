@@ -3,7 +3,7 @@ from typing import Optional, List, Dict, Any
 from sqlalchemy import select, desc, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.database.models import User, FuelLog, ServiceLog, ItemLocation, Task
+from bot.database.models import User, FuelLog, ServiceLog, ItemLocation, Task, ChatHistory
 
 
 
@@ -309,4 +309,58 @@ async def complete_task(
         await session.flush()
         return True
     return False
+
+
+# --- История диалога (ChatHistory / Память контекста) ---
+
+async def add_chat_message(
+    session: AsyncSession,
+    user_id: int,
+    role: str,
+    content: str
+) -> ChatHistory:
+    """Сохраняет реплику диалога (пользователя или ассистента) в базу данных."""
+    msg = ChatHistory(
+        user_id=user_id,
+        role=role,
+        content=content,
+        created_at=datetime.now()
+    )
+    session.add(msg)
+    await session.flush()
+    return msg
+
+
+async def get_recent_chat_history(
+    session: AsyncSession,
+    user_id: int,
+    limit: int = 10
+) -> List[Dict[str, str]]:
+    """
+    Возвращает последние N сообщений диалога пользователя в хронологическом порядке (от старых к новым).
+    Формат: [{'role': 'user'|'assistant', 'content': '...'}]
+    """
+    stmt = (
+        select(ChatHistory)
+        .where(ChatHistory.user_id == user_id)
+        .order_by(desc(ChatHistory.created_at))
+        .limit(limit)
+    )
+    result = await session.execute(stmt)
+    records = list(result.scalars().all())
+    # Разворачиваем, чтобы диалог шел в хронологическом порядке
+    records.reverse()
+    return [{"role": r.role, "content": r.content} for r in records]
+
+
+async def clear_chat_history(
+    session: AsyncSession,
+    user_id: int
+) -> int:
+    """Очищает историю диалога пользователя (сброс контекста памяти)."""
+    stmt = delete(ChatHistory).where(ChatHistory.user_id == user_id)
+    result = await session.execute(stmt)
+    await session.flush()
+    return result.rowcount
+
 

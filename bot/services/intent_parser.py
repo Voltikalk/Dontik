@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from openai import AsyncOpenAI
 from bot.config import settings
 
@@ -71,9 +71,11 @@ def get_groq_client() -> AsyncOpenAI:
     )
 
 
-async def parse_user_intent(text: str) -> Dict[str, Any]:
+async def parse_user_intent(text: str, context: Optional[str] = None) -> Dict[str, Any]:
     """
     Парсит текст пользователя через Groq LLM в строгий JSON.
+    Принимает опциональный контекст последних реплик для точного разрешения местоимений
+    ("а для 50?", "почему так?", "запиши это").
     Использует qwen/qwen3.8-27b с автоматическим fallback на gpt-oss-120b.
     """
     client = get_groq_client()
@@ -83,14 +85,19 @@ async def parse_user_intent(text: str) -> Dict[str, Any]:
         if fallback not in candidate_models:
             candidate_models.append(fallback)
 
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if context:
+        messages.append({
+            "role": "system",
+            "content": f"Контекст последних сообщений диалога с пользователем:\n{context}"
+        })
+    messages.append({"role": "user", "content": text})
+
     for model_name in candidate_models:
         try:
             response = await client.chat.completions.create(
                 model=model_name,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": text}
-                ],
+                messages=messages,
                 response_format={"type": "json_object"},
                 temperature=0.1
             )
