@@ -9,19 +9,23 @@ from .search_agent import SearchAnalystAgent
 from .tech_expert_agent import TechExpertAgent
 from .doc_finance_agent import DocFinanceAgent
 from .planner_agent import PlannerAgent
+from .critic_agent import CriticAgent
 
 logger = logging.getLogger(__name__)
 
 SYNTHESIS_PROMPT = """Ты — главный Агент-Оркестратор («Пётр — Советник»).
-Ты объединяешь выводы и рекомендации специализированных субагентов в единый, структурированный, исчерпывающий и удобный для чтения финальный отчет в Telegram.
+Ты объединяешь выводы и рекомендации специализированных субагентов в единый, глубоко продуманный, выверенный и удобный для чтения финальный отчет в Telegram.
 
 ТВОЯ ЗАДАЧА:
 1. Краткое резюме сути (2-3 предложения с ключевыми выводами).
-2. Сводный раздел с ключевыми пунктами от субагентов:
-   - Техническая часть и инструмент
-   - Цены, артикулы и сметный бюджет
-   - Пошаговый план и сроки
-3. Главный совет мастера и предупреждения об ошибках.
+2. Раздел глубоких размышлений и аудита рисков (Thinking / Risk Audit):
+   💡 **Анализ рисков и скрытые нюансы:**
+   - Неочевидные подводные камни, которые выявил Критик (закисшие болты, ошибки новичков, скрытые расходы, техника безопасности).
+3. Сводный раздел с практическими решениями:
+   - 🔧 Технический регламент и инструмент
+   - 💰 Цены, артикулы и смета расходов
+   - 📋 Пошаговый план и сроки
+4. Главный совет мастера и итоговая рекомендация.
 
 ПРАВИЛА ОФОРМЛЕНИЯ:
 - Красивое разделение блоков через эмодзи и заголовки.
@@ -39,6 +43,7 @@ class MultiAgentOrchestrator:
         self.tech_agent = TechExpertAgent()
         self.finance_agent = DocFinanceAgent()
         self.planner_agent = PlannerAgent()
+        self.critic_agent = CriticAgent()
 
     def select_agents_for_task(self, task: str) -> List[str]:
         """
@@ -132,9 +137,24 @@ class MultiAgentOrchestrator:
                 else:
                     logger.error(f"[Orchestrator] Ошибка субагента {key}: {res}")
 
-        # --- ЭТАП 3: Синтез результатов Оркестратором ---
+        # --- ЭТАП 3: Глубокое мышление, поиск рисков и критика (Reflexion) ---
         if on_progress:
-            await on_progress("⚡ <i>Оркестратор формирует итоговый сводный отчет...</i>")
+            await on_progress("🧠 <i>[Анализ рисков] Проверяю расчеты, технологию и скрытые подводные камни...</i>")
+
+        preliminary_blocks = []
+        for k, res in results.items():
+            preliminary_blocks.append(f"[{res.emoji} {res.title}]:\n{res.summary}")
+        preliminary_text = "\n\n".join(preliminary_blocks)
+
+        try:
+            critic_res = await self.critic_agent.run(task, {"drafts_summary": preliminary_text})
+            results["critic"] = critic_res
+        except Exception as e:
+            logger.error(f"[Orchestrator] Ошибка субагента-критика: {e}")
+
+        # --- ЭТАП 4: Финальный синтез результатов Оркестратором ---
+        if on_progress:
+            await on_progress("⚡ <i>Оркестратор объединяет проверенные выводы и формирует финальный вердикт...</i>")
 
         # Собираем данные всех агентов
         subagent_blocks = []
