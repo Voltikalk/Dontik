@@ -1,0 +1,30 @@
+# Environment variables and secrets
+.env
+
+# Python virtual environment
+.venv/
+env/
+venv/
+ENV/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Temporary voice files
+temp/
+data/temp/
+
+# Database files
+*.sqlite3
+*.db
+*.db-journal
+data/*.db
+
+# Logs
+*.log
+
+# IDE settings
+.idea/
+*.swp
