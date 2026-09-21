@@ -1,5 +1,5 @@
 import os
-from typing import List, Union
+from typing import List, Union, Optional
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -14,6 +14,14 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite+aiosqlite:///data/garage.db"
     GROQ_MODEL: str = "qwen/qwen3.8-27b"
     GROQ_WHISPER_MODEL: str = "whisper-large-v3-turbo"
+
+    # Коннектор почты (IMAP / SMTP)
+    EMAIL_USER: Optional[str] = None
+    EMAIL_PASSWORD: Optional[str] = None
+    EMAIL_IMAP_HOST: Optional[str] = None
+    EMAIL_IMAP_PORT: int = 993
+    EMAIL_SMTP_HOST: Optional[str] = None
+    EMAIL_SMTP_PORT: int = 465
 
     model_config = SettingsConfigDict(
         env_file=".env",

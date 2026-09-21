@@ -300,6 +300,10 @@ async def handle_text_message(message: Message, state: FSMContext):
     elif lowered in {"задачи", "дела", "список задач", "список дел", "что сделать", "планы"}:
         await cmd_tasks(message)
         return
+    elif lowered in {"почта", "проверь почту", "что на почте", "новые письма", "письма", "входящие письма", "проверить почту"}:
+        from bot.handlers.email_handler import cmd_check_mail
+        await cmd_check_mail(message)
+        return
     elif lowered in {"статистика", "статы", "расходы", "заправки"}:
         await cmd_stats(message)
         return
