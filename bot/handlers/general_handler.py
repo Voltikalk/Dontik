@@ -5,6 +5,7 @@ from aiogram.types import Message
 
 from bot.database.db import get_session
 from bot.database import crud
+from bot.keyboards.inline import get_tasks_keyboard
 
 logger = logging.getLogger(__name__)
 
@@ -103,5 +104,6 @@ async def cmd_tasks(message: Message):
         due_str = f" <i>(срок: {html.quote(t.due_date)})</i>" if t.due_date else ""
         lines.append(f"{idx}. <b>{html.quote(t.title)}</b>{due_str}")
 
-    await message.answer("\n".join(lines))
+    kb = get_tasks_keyboard(tasks)
+    await message.answer("\n".join(lines), reply_markup=kb)
 

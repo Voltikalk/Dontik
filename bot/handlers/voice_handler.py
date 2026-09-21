@@ -11,8 +11,9 @@ from bot.database.db import get_session
 from bot.database import crud
 from bot.services.speech_to_text import transcribe_voice
 from bot.services.intent_parser import parse_user_intent
-from bot.keyboards.inline import get_entry_confirm_keyboard
+from bot.keyboards.inline import get_entry_confirm_keyboard, get_tasks_keyboard
 from bot.handlers.states import GarageEntryState
+from bot.services.draft_store import save_draft
 
 logger = logging.getLogger(__name__)
 
@@ -162,20 +163,30 @@ async def handle_voice_entry(message: Message, bot: Bot, state: FSMContext):
                 for idx, t in enumerate(tasks, 1):
                     due = f" _(срок: {t.due_date})_" if t.due_date else ""
                     lines.append(f"{idx}. {t.title}{due}")
-                await message.answer("\n".join(lines), parse_mode="Markdown")
+                kb = get_tasks_keyboard(tasks)
+                await message.answer("\n".join(lines), reply_markup=kb, parse_mode="Markdown")
             else:
                 await message.answer("🎉 У тебя нет активных задач! Все дела выполнены или еще не записаны.")
 
         # --- Ветка 3: Заправка, сервис, сохранение вещи, задача ---
         elif intent in ["fuel", "service", "item_save", "task_save"]:
-            # Сохранение спарсенных данных в FSM
+            # Сохранение в изолированное хранилище черновиков по draft_id
+            draft_id = save_draft(user_id=user_id, intent=intent, data=data)
+
+            # Дополнительное сохранение в FSM (дублирование для надежности)
             await state.set_state(GarageEntryState.waiting_confirmation)
-            await state.update_data(intent=intent, data=data, transcript=transcript)
+            await state.update_data(
+                intent=intent,
+                payload=data,
+                transcript=transcript,
+                draft_id=draft_id,
+                **data
+            )
 
             card_text = format_markdown_card(intent=intent, data=data)
             await message.answer(
                 card_text,
-                reply_markup=get_entry_confirm_keyboard(),
+                reply_markup=get_entry_confirm_keyboard(draft_id=draft_id),
                 parse_mode="Markdown"
             )
 
