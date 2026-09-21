@@ -13,8 +13,11 @@ from bot.services.draft_store import save_draft
 from bot.handlers.voice_handler import format_markdown_card
 from bot.handlers.states import GarageEntryState
 from bot.services.formatters import send_formatted_message
+from bot.services.agents import MultiAgentOrchestrator
 
 logger = logging.getLogger(__name__)
+
+orchestrator = MultiAgentOrchestrator()
 
 router = Router(name="general_handler_router")
 
@@ -38,8 +41,10 @@ async def cmd_start(message: Message):
         "• ⛽ <b>Заправки:</b> <i>«Заправил 35 литров на две тысячи, пробег 150 000»</i>\n"
         "• 📦 <b>Вещи:</b> <i>«Положил домкрат под верстак»</i> / <i>«Где лежит домкрат?»</i>\n"
         "• 📄 <b>Документы:</b> отправляй PDF, Word (.docx), Excel (.xlsx, .csv), TXT для анализа\n"
-        "• 🖼 <b>Фотографии:</b> присылай фото деталей, чеков, приборов, схем или предметов\n\n"
+        "• 🖼 <b>Фотографии:</b> присылай фото деталей, чеков, приборов, схем или предметов\n"
+        "• 🤖 <b>Субагенты:</b> <code>/agent</code> — запуск команды субагентов для глубокого разбора\n\n"
         "📌 <b>Быстрые команды:</b>\n"
+        "/agent — глубокое исследование задачи командой субагентов\n"
         "/tasks — список актуальных задач с кнопками выполнения\n"
         "/stats — сводка по заправкам и ремонтам\n"
         "/items — каталог вещей в гараже\n"
@@ -47,6 +52,74 @@ async def cmd_start(message: Message):
         "/help — подробная справка"
     )
     await message.answer(text)
+
+
+@router.message(Command("agent", "research"))
+async def cmd_agent(message: Message):
+    """
+    Обработчик команды /agent или /research для запуска мультиагентной системы.
+    """
+    user_id = message.from_user.id
+    text = (message.text or "").strip()
+    parts = text.split(maxsplit=1)
+
+    if len(parts) < 2 or not parts[1].strip():
+        help_text = (
+            "🤖 <b>Команда субагентов (Multi-Agent System)</b>\n\n"
+            "Запускает совместную работу специализированных субагентов для глубокого решения задачи:\n"
+            "• 🔍 <b>Поиск и аналитика</b> — мониторинг цен, артикулов и предложений в сети\n"
+            "• 🔧 <b>Технический эксперт</b> — регламенты, инструмент, моменты затяжки, нюансы ремонта\n"
+            "• 📊 <b>Сметы и расчеты</b> — финансовая калькуляция, аудит расходов, сравнение смет\n"
+            "• 📋 <b>Планировщик</b> — пошаговый чек-лист этапов и временные оценки\n\n"
+            "💡 <b>Примеры запуска:</b>\n"
+            "<code>/agent Замена сцепления на ВАЗ 2121 Нива: регламент, цены на комплект Valeo и пошаговый план</code>\n\n"
+            "<code>/agent Капитальный ремонт дачной беседки: смета материалов, закупка и этапы</code>"
+        )
+        await message.answer(help_text)
+        return
+
+    task = parts[1].strip()
+    status_msg = await message.answer("🤖 <i>Запуск команды субагентов...</i>")
+
+    async def update_progress(msg: str):
+        try:
+            await status_msg.edit_text(msg)
+        except Exception:
+            pass
+
+    try:
+        async with get_session() as session:
+            history = await crud.get_recent_chat_history(session, user_id=user_id, limit=3)
+
+        context = {}
+        if history:
+            context["history"] = history
+
+        final_report = await orchestrator.execute_task(
+            task=task,
+            context=context,
+            on_progress=update_progress
+        )
+
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+
+        await send_formatted_message(message, final_report)
+
+        # Сохраняем в историю диалога
+        async with get_session() as session:
+            await crud.add_chat_message(session, user_id=user_id, role="user", content=f"/agent {task}")
+            await crud.add_chat_message(session, user_id=user_id, role="assistant", content=final_report)
+
+    except Exception as e:
+        logger.error(f"Ошибка при работе субагентов: {e}", exc_info=True)
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+        await message.answer(f"⚠️ Ошибка при выполнении задачи субагентами: {e}")
 
 
 @router.message(Command("stats"))
@@ -179,7 +252,10 @@ async def cmd_help(message: Message):
         "📦 <b>Поиск и хранение вещей:</b>\n"
         "• <i>«Положил зарядник для аккумулятора в синий ящик»</i>\n"
         "• <i>«Где лежит зарядник?»</i>\n\n"
+        "🤖 <b>Команда субагентов (Multi-Agent System):</b>\n"
+        "• <code>/agent &lt;задача&gt;</code> — запускает команду узких специалистов (поиск цен, техэкспертиза, расчет сметы и пошаговый план) для глубокого решения комплексных задач.\n\n"
         "📌 <b>Быстрые команды из меню ввода:</b>\n"
+        "/agent — запуск команды субагентов для глубокого разбора\n"
         "/tasks — актуальный список дел\n"
         "/stats — сводка по заправкам и ремонтам\n"
         "/items — каталог вещей в гараже\n"

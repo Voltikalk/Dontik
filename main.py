@@ -25,6 +25,7 @@ logger = logging.getLogger("auto_garage_bot")
 async def setup_bot_commands(bot: Bot) -> None:
     """Установка списка команд в кнопке 'Меню' строки ввода Telegram."""
     commands = [
+        BotCommand(command="agent", description="🤖 Совет субагентов (глубокий анализ)"),
         BotCommand(command="tasks", description="📋 Список дел и задач"),
         BotCommand(command="stats", description="📊 Сводка: авто, заправки, ТО"),
         BotCommand(command="items", description="📦 Вещи в гараже/на даче"),
