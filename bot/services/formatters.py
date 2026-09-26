@@ -171,117 +171,60 @@ def format_stats_summary(fuel_stats: Dict[str, Any]) -> str:
         lines.append(f"• <b>Средний расход:</b> <code>{avg_consumption:.1f} л / 100 км</code>")
     return "\n".join(lines)
 
-   # --- Словари символов Unicode для степеней и индексов ---
+from pylatexenc.latex2text import LatexNodes2Text, get_default_latex_context_db, MacroTextSpec
+
+# Настройка парсера LaTeX в Unicode
+_latex_db = get_default_latex_context_db()
+
+def _frac_repl(node, l2tobj):
+    num = l2tobj.nodelist_to_text([node.nodeargs[0]]).strip()
+    den = l2tobj.nodelist_to_text([node.nodeargs[1]]).strip()
+    has_op_num = any(c in num for c in ['+', '-', '=', ' ', '·', '×'])
+    has_op_den = any(c in den for c in ['+', '-', '=', ' ', '·', '×'])
+    n_str = f'({num})' if has_op_num else num
+    d_str = f'({den})' if has_op_den else den
+    return f'{n_str} / {d_str}'
+
+def _sqrt_repl(node, l2tobj):
+    inner = l2tobj.nodelist_to_text([node.nodeargs[0]]).strip()
+    if len(inner) <= 3 and not any(op in inner for op in '+-*/±= '):
+        return f'√{inner}'
+    return f'√({inner})'
+
+_latex_db.add_context_category('math_overrides', macros=[
+    MacroTextSpec('frac', simplify_repl=_frac_repl),
+    MacroTextSpec('sqrt', simplify_repl=_sqrt_repl),
+    MacroTextSpec('displaystyle', simplify_repl=''),
+    MacroTextSpec('textstyle', simplify_repl=''),
+], prepend=True)
+
+_latex_converter = LatexNodes2Text(latex_context=_latex_db)
+
+# --- Словари символов Unicode для степеней и индексов ---
 SUPERSCRIPTS = {
     '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴',
     '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹',
     '+': '⁺', '-': '⁻', '=': '⁼', '(': '⁽', ')': '⁾',
-    'n': 'ⁿ', 'i': 'ⁱ', 'x': 'ˣ', 'y': 'ʸ', 'a': 'ᵃ', 'b': 'ᵇ'
+    'a': 'ᵃ', 'b': 'ᵇ', 'c': 'ᶜ', 'd': 'ᵈ', 'e': 'ᵉ',
+    'f': 'ᶠ', 'g': 'ᵍ', 'h': 'ʰ', 'i': 'ⁱ', 'j': 'ʲ',
+    'k': 'ᵏ', 'l': 'ˡ', 'm': 'ᵐ', 'n': 'ⁿ', 'o': 'ᵒ',
+    'p': 'ᵖ', 'r': 'ʳ', 's': 'ˢ', 't': 'ᵗ', 'u': 'ᵘ',
+    'v': 'ᵛ', 'w': 'ʷ', 'x': 'ˣ', 'y': 'ʸ', 'z': 'ᶻ',
+    'A': 'ᴬ', 'B': 'ᴮ', 'D': 'ᴰ', 'E': 'ᴱ', 'G': 'ᴳ',
+    'H': 'ᴴ', 'I': 'ᴵ', 'J': 'ᴶ', 'K': 'ᴷ', 'L': 'ᴸ',
+    'M': 'ᴹ', 'N': 'ᴺ', 'O': 'ᴼ', 'P': 'ᴾ', 'R': 'ᴿ',
+    'T': 'ᵀ', 'U': 'ᵁ', 'W': 'ᵂ',
 }
 
 SUBSCRIPTS = {
     '0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄',
     '5': '₅', '6': '₆', '7': '₇', '8': '₈', '9': '₉',
     '+': '₊', '-': '₋', '=': '₌', '(': '₍', ')': '₎',
-    ',': ',', ';': ';',
     'a': 'ₐ', 'e': 'ₑ', 'h': 'ₕ', 'i': 'ᵢ', 'j': 'ⱼ',
     'k': 'ₖ', 'l': 'ₗ', 'm': 'ₘ', 'n': 'ₙ', 'o': 'ₒ',
     'p': 'ₚ', 'r': 'ᵣ', 's': 'ₛ', 't': 'ₜ', 'u': 'ᵤ',
     'v': 'ᵥ', 'x': 'ₓ'
 }
-
-LATEX_SYMBOLS = [
-    (r'\\pm', '±'),
-    (r'\\mp', '∓'),
-    (r'\\approx', '≈'),
-    (r'\\sim', '~'),
-    (r'\\neq', '≠'),
-    (r'\\ne', '≠'),
-    (r'\\leq', '≤'),
-    (r'\\le', '≤'),
-    (r'\\geq', '≥'),
-    (r'\\ge', '≥'),
-    (r'\\times', '×'),
-    (r'\\cdot', '·'),
-    (r'\\div', '÷'),
-    (r'\\degree', '°'),
-    (r'\\circ', '°'),
-    (r'\\infty', '∞'),
-    (r'\\in', '∈'),
-    (r'\\notin', '∉'),
-    (r'\\subset', '⊂'),
-    (r'\\subseteq', '⊆'),
-    (r'\\cup', '∪'),
-    (r'\\cap', '∩'),
-    (r'\\emptyset', '∅'),
-    (r'\\forall', '∀'),
-    (r'\\exists', '∃'),
-    (r'\\to', '→'),
-    (r'\\rightarrow', '→'),
-    (r'\\implies', '⇒'),
-    (r'\\Rightarrow', '⇒'),
-    (r'\\iff', '⇔'),
-    (r'\\Leftrightarrow', '⇔'),
-    (r'\\alpha', 'α'),
-    (r'\\beta', 'β'),
-    (r'\\gamma', 'γ'),
-    (r'\\delta', 'δ'),
-    (r'\\epsilon', 'ε'),
-    (r'\\varepsilon', 'ε'),
-    (r'\\zeta', 'ζ'),
-    (r'\\eta', 'η'),
-    (r'\\theta', 'θ'),
-    (r'\\vartheta', 'θ'),
-    (r'\\iota', 'ι'),
-    (r'\\kappa', 'κ'),
-    (r'\\lambda', 'λ'),
-    (r'\\mu', 'μ'),
-    (r'\\nu', 'ν'),
-    (r'\\xi', 'ξ'),
-    (r'\\pi', 'π'),
-    (r'\\rho', 'ρ'),
-    (r'\\sigma', 'σ'),
-    (r'\\tau', 'τ'),
-    (r'\\phi', 'φ'),
-    (r'\\varphi', 'φ'),
-    (r'\\chi', 'χ'),
-    (r'\\psi', 'ψ'),
-    (r'\\omega', 'ω'),
-    (r'\\Gamma', 'Γ'),
-    (r'\\Delta', 'Δ'),
-    (r'\\Theta', 'Θ'),
-    (r'\\Lambda', 'Λ'),
-    (r'\\Xi', 'Ξ'),
-    (r'\\Pi', 'Π'),
-    (r'\\Sigma', 'Σ'),
-    (r'\\Phi', 'Φ'),
-    (r'\\Psi', 'Ψ'),
-    (r'\\Omega', 'Ω'),
-    (r'\\sum', '∑'),
-    (r'\\prod', '∏'),
-    (r'\\int', '∫'),
-    (r'\\iint', '∬'),
-    (r'\\iiint', '∭'),
-    (r'\\partial', '∂'),
-    (r'\\nabla', '∇'),
-    (r'\\left\(', '('),
-    (r'\\right\)', ')'),
-    (r'\\left\[', '['),
-    (r'\\right\]', ']'),
-    (r'\\left\\\{', '{'),
-    (r'\\right\\\}', '}'),
-    (r'\\\{', '{'),
-    (r'\\\}', '}'),
-    (r'\\quad', '  '),
-    (r'\\qquad', '    '),
-    (r'\\,', ' '),
-    (r'\\;', ' '),
-    (r'\\!', ''),
-    (r'\\text\{([^}]+)\}', r'\1'),
-    (r'\\mathrm\{([^}]+)\}', r'\1'),
-    (r'\\mathbf\{([^}]+)\}', r'\1'),
-    (r'\\boldsymbol\{([^}]+)\}', r'\1'),
-]
 
 
 def to_sup(text: str) -> str:
@@ -294,48 +237,75 @@ def to_sub(text: str) -> str:
     return "".join(SUBSCRIPTS.get(c, c) for c in text)
 
 
+def strip_boxed(text: str) -> str:
+    """Безопасно извлекает содержимое \\boxed{...} с учетом произвольной вложенности фигурных скобок."""
+    while r'\boxed{' in text:
+        idx = text.find(r'\boxed{')
+        start = idx + len(r'\boxed{')
+        depth = 1
+        pos = start
+        while pos < len(text) and depth > 0:
+            if text[pos] == '{':
+                depth += 1
+            elif text[pos] == '}':
+                depth -= 1
+            pos += 1
+        if depth == 0:
+            inner = text[start:pos - 1]
+            text = text[:idx] + inner + text[pos:]
+        else:
+            break
+    return text
+
+
+def preprocess_latex(s: str) -> str:
+    """Предварительная очистка команд разметки LaTeX перед парсингом формулы."""
+    s = strip_boxed(s)
+    s = re.sub(r'\\(displaystyle|textstyle|limits|nolimits)\b', '', s)
+    s = re.sub(r'\\(left|right)\s*([()\[\]{}|.])', r'\2', s)
+    s = re.sub(r'\\(left|right)\b', '', s)
+    s = re.sub(r'\\quad', '   ', s)
+    s = re.sub(r'\\qquad', '     ', s)
+    s = re.sub(r'\\[,;!]', ' ', s)
+    return s
+
+
+def postprocess_unicode_math(text: str) -> str:
+    """Постобработка строки формулы: конвертация степеней, индексов и операторов в красивый Unicode."""
+    # 1. Верхние индексы ^{...}
+    text = re.sub(r'\^\{([^}]+)\}', lambda m: to_sup(m.group(1)), text)
+    # 2. Одиночные верхние индексы: x^3, e^x, n^4 (без + и -, чтобы не поглощать e^x-1)
+    text = re.sub(r'([a-zA-Z0-9π\(\)])\^([0-9a-zA-Z]+)', lambda m: m.group(1) + to_sup(m.group(2)), text)
+    # 2.1 Отрицательные верхние индексы: e^-nx, 10^-5, x^-1
+    text = re.sub(r'([a-zA-Z0-9π\(\)])\^-([0-9a-zA-Z]+)', lambda m: m.group(1) + '⁻' + to_sup(m.group(2)), text)
+    # 3. Нижние индексы _{...}
+    text = re.sub(r'_\{([^}]+)\}', lambda m: to_sub(m.group(1)), text)
+    # 4. Одиночные нижние индексы: x_1, a_0, ∫_0, ∑_n=1
+    text = re.sub(r'([a-zA-Z0-9∫∑∏\(\)])_([0-9a-zA-Z+=]+)', lambda m: m.group(1) + to_sub(m.group(2)), text)
+    # 5. Пределы интегралов
+    text = text.replace('∫_0', '∫₀').replace('∫_a', '∫ₐ')
+    # 6. Умножение
+    text = text.replace(' * ', ' · ')
+    # 7. Лишние пробелы
+    text = re.sub(r' {2,}', ' ', text)
+    return text.strip()
+
+
 def convert_latex_math(text: str) -> str:
     """
-    Преобразует математические выражения и команды LaTeX в красивый человекочитаемый Unicode.
-    Пример: \\sqrt{38} -> √38, x^2 -> x², x_1 -> x₁, \\pm -> ±, \\approx -> ≈.
+    Преобразует математические выражения и формулы LaTeX в красивый, человекочитаемый Unicode.
+    Использует проверенную библиотеку pylatexenc для синтаксического анализа формул
+    в сочетании с умной постобработкой степеней, индексов и дробей.
     """
     if not text:
         return ""
-
-    # Замена корней \sqrt[n]{x} и \sqrt{x}
-    text = re.sub(r'\\sqrt\[(\d+)\]\{([^}]+)\}', r'\1√(\2)', text)
-    def repl_sqrt(m):
-        inner = m.group(1).strip()
-        if len(inner) <= 3 and not any(op in inner for op in '+-*/±= '):
-            return f"√{inner}"
-        return f"√({inner})"
-    text = re.sub(r'\\sqrt\{([^}]+)\}', repl_sqrt, text)
-
-    # Замена дробей \frac{a}{b} -> (a) / (b)
-    def repl_frac(m):
-        num = m.group(1).strip()
-        den = m.group(2).strip()
-        if len(num) <= 2 and len(den) <= 2 and not any(op in num+den for op in '+-*/±= '):
-            return f"{num}/{den}"
-        return f"({num}) / ({den})"
-    text = re.sub(r'\\frac\{([^}]+)\}\{([^}]+)\}', repl_frac, text)
-
-    # Замена стандартных символов и команд
-    for pattern, repl in LATEX_SYMBOLS:
-        text = re.sub(pattern, repl, text)
-
-    # Степени: ^{...} или ^x
-    text = re.sub(r'\^\{([0-9a-zA-Z+-]+)\}', lambda m: to_sup(m.group(1)), text)
-    text = re.sub(r'\^([0-9a-zA-Z+-])', lambda m: to_sup(m.group(1)), text)
-
-    # Индексы: _{...} или _x
-    text = re.sub(r'_\{([0-9a-zA-Z+-,;]+)\}', lambda m: to_sub(m.group(1)), text)
-    text = re.sub(r'_([0-9a-zA-Z+-])', lambda m: to_sub(m.group(1)), text)
-
-    # Убираем оставшиеся обратные слэши перед словами
-    text = re.sub(r'\\([a-zA-Z]+)', r'\1', text)
-
-    return text
+    pre = preprocess_latex(text.strip())
+    try:
+        converted = _latex_converter.latex_to_text(pre)
+    except Exception as e:
+        logger.debug(f"Ошибка при разборе LaTeX через pylatexenc: {e}")
+        converted = pre
+    return postprocess_unicode_math(converted)
 
 
 def strip_md_wrapping(s: str) -> str:
@@ -545,6 +515,26 @@ def md_to_telegram_html(text: str) -> str:
 
     text = re.sub(r'(?<!\$)\$(?!\$)([^$\n]+)(?<!\$)\$(?!\$)', save_inline_math, text)
     text = re.sub(r'\\\((.+?)\\\)', save_inline_math, text)
+
+    # 5.1 Обрабатываем строки с явными формулами LaTeX (\int, \frac, \sum, \sqrt, \zeta, \boxed), если они не были обернуты в $$ или $
+    STANDALONE_MATH_RE = re.compile(
+        r'^[ \t]*(?:[a-zA-Z0-9_\(\)]+\s*=\s*)?\\(?:frac|int|iint|iiint|sum|prod|sqrt|boxed|zeta)(?![a-zA-Z])'
+    )
+
+    def save_unwrapped_math_line(m):
+        raw_line = m.group(0).strip()
+        if STANDALONE_MATH_RE.match(raw_line):
+            converted = convert_latex_math(raw_line)
+            math_blocks.append(converted)
+            return f"\nXXMATHBLOCK{len(math_blocks)-1}XX\n"
+        return convert_latex_math(raw_line)
+
+    text = re.sub(
+        r'^[ \t]*([^\n]*?\\(?:frac|int|iint|iiint|sum|prod|sqrt|boxed|zeta|alpha|beta|gamma|delta|pi|infty)(?![a-zA-Z])[^\n]*)$',
+        save_unwrapped_math_line,
+        text,
+        flags=re.MULTILINE
+    )
 
     # 6. Сохраняем УЖЕ существующие валидные Telegram HTML теги (<b>, </b>, <i>, </i>, <code>, </code>, <blockquote>, </blockquote>, <a>, </a>)
     valid_tags = []
