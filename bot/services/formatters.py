@@ -346,13 +346,26 @@ def strip_md_wrapping(s: str) -> str:
     return s
 
 
+def is_index_cell(val: str, header: str = "") -> bool:
+    """Проверяет, является ли ячейка порядковым номером, ID или маркером списка."""
+    clean = strip_md_wrapping(val).strip().rstrip(".)")
+    h_lower = header.lower().strip()
+    if h_lower in {"№", "#", "n", "n°", "номер", "item", "id", "count", "п/п", "№ п/п", "index"}:
+        return True
+    if clean.isdigit():
+        return True
+    if clean.lower() in {"последнее", "итог", "всего"}:
+        return True
+    return False
+
+
 def convert_markdown_tables(text: str) -> str:
     """
-    Интеллектуально преобразует Markdown-таблицы в аккуратный, структурированный вид для Telegram:
-    - Распознает нумерованные списки (колонки №, #, ID) и превращает их в пункты «1. **Название**» с подпунктами.
-    - Двухколоночные таблицы преобразует в компактный список «• **Параметр:** Значение».
-    - Многоколоночные таблицы оформляет аккуратными карточками с маркерами колонок.
-    - Полностью исключает нечитаемые вертикальные палочки (|) и разделители.
+    Интеллектуально преобразует Markdown-таблицы в аккуратный, структурированный и компактный вид для Telegram:
+    - Преобразует строки в читаемые пункты списков без вертикальных палочек (|).
+    - Форматирует параметры в одну строку: «1. **Имя** (период/цена) — описание/примечание».
+    - Не допускает раздувания одной строки таблицы в громоздкие многострочные подпункты.
+    - Двухколоночные таблицы преобразует в «• **Параметр:** Значение».
     """
     lines = text.split("\n")
     new_lines = []
@@ -369,20 +382,20 @@ def convert_markdown_tables(text: str) -> str:
                 parsed_rows = []
                 for t_line in table_lines:
                     clean = t_line.strip("|")
-                    cells = [c.strip() for c in clean.split("|")]
+                    cells = [strip_md_wrapping(c) for c in clean.split("|")]
                     if all(re.match(r'^:?-+:?$', c) for c in cells if c):
                         continue
                     if any(cells):
                         parsed_rows.append(cells)
 
                 if parsed_rows:
-                    headers = [strip_md_wrapping(h) for h in parsed_rows[0]]
+                    headers = [h for h in parsed_rows[0]]
                     data_rows = parsed_rows[1:]
 
-                    first_header_lower = headers[0].lower() if headers else ""
-                    is_first_col_num = (
-                        first_header_lower in {"№", "#", "n", "n°", "номер", "item", "id", "count", "п/п", "№ п/п"} or
-                        all(re.match(r'^\*{0,2}\d+[\.\)]?\*{0,2}$', r[0].strip()) for r in data_rows if r)
+                    first_header = headers[0] if headers else ""
+                    has_index_col = (
+                        is_index_cell("", first_header) or
+                        (len(data_rows) > 0 and sum(1 for r in data_rows if r and is_index_cell(r[0], first_header)) >= len(data_rows) * 0.5)
                     )
 
                     formatted_items = []
@@ -390,38 +403,75 @@ def convert_markdown_tables(text: str) -> str:
                         if not any(row):
                             continue
 
-                        if is_first_col_num and len(row) > 1:
-                            num = strip_md_wrapping(row[0]).rstrip(".")
-                            title = strip_md_wrapping(row[1])
-                            lead = f"{num}. **{title}**"
-                            rem_start = 2
+                        # Игнорируем строки-заполнители, если в них только точки или прочерки
+                        if all(c in {"…", "...", "—", "-", ""} for c in row):
+                            continue
+
+                        # Определяем индекс, заголовок и оставшиеся колонки
+                        if has_index_col and len(row) > 1:
+                            raw_idx = row[0].strip().rstrip(".)")
+                            num = f"{raw_idx}. " if raw_idx.isdigit() else "• "
+                            title = row[1].strip()
+                            rem_cols = row[2:]
+                            rem_headers = headers[2:] if len(headers) > 2 else []
                         elif len(row) == 2:
-                            key = strip_md_wrapping(row[0])
-                            val = strip_md_wrapping(row[1])
-                            formatted_items.append(f"• **{key}:** {val}")
+                            k, v = row[0].strip(), row[1].strip()
+                            formatted_items.append(f"• **{k}:** {v}")
                             continue
                         else:
-                            title = strip_md_wrapping(row[0])
-                            lead = f"• **{title}**"
-                            rem_start = 1
+                            num = "• "
+                            title = row[0].strip()
+                            rem_cols = row[1:]
+                            rem_headers = headers[1:] if len(headers) > 1 else []
 
-                        sub_points = []
-                        for col_idx in range(rem_start, len(row)):
-                            val = row[col_idx].strip()
+                        if not title or title in {"…", "..."}:
+                            continue
+
+                        meta_val = None
+                        note_val = None
+                        other_parts = []
+
+                        for c_idx, val in enumerate(rem_cols):
+                            val = val.strip()
                             if not val or val == "-":
                                 continue
-                            h_name = headers[col_idx] if col_idx < len(headers) else ""
-                            if h_name:
-                                sub_points.append(f"   • **{h_name}:** {val}")
-                            else:
-                                sub_points.append(f"   • {val}")
+                            h_name = rem_headers[c_idx].strip() if c_idx < len(rem_headers) else ""
+                            h_lower = h_name.lower()
 
-                        if sub_points:
-                            formatted_items.append(lead + "\n" + "\n".join(sub_points))
+                            is_meta = any(k in h_lower for k in ["год", "период", "дат", "время", "срок", "цена", "стоимост", "date", "year", "price"])
+                            is_note = any(k in h_lower for k in ["примечани", "описани", "детал", "комментар", "суть", "note", "desc", "comment"])
+
+                            if is_meta and not meta_val and len(val) < 45:
+                                meta_val = val
+                            elif is_note and not note_val:
+                                note_val = val
+                            else:
+                                if h_name and not is_meta and not is_note:
+                                    other_parts.append(f"{h_name}: {val}")
+                                else:
+                                    other_parts.append(val)
+
+                        lead = f"{num}**{title}**"
+                        if meta_val:
+                            lead += f" ({meta_val})"
+
+                        if note_val and not other_parts:
+                            if len(note_val) > 75:
+                                formatted_items.append(f"{lead}\n   ↳ {note_val}")
+                            else:
+                                formatted_items.append(f"{lead} — {note_val}")
+                        elif other_parts:
+                            tail = " · ".join(other_parts)
+                            if note_val:
+                                tail += f" — {note_val}"
+                            if len(tail) > 75:
+                                formatted_items.append(f"{lead}\n   ↳ {tail}")
+                            else:
+                                formatted_items.append(f"{lead} — {tail}")
                         else:
                             formatted_items.append(lead)
 
-                    new_lines.append("\n\n".join(formatted_items))
+                    new_lines.append("\n".join(formatted_items))
                     continue
             else:
                 new_lines.extend(table_lines)
@@ -506,6 +556,14 @@ def md_to_telegram_html(text: str) -> str:
 
     # 7. Безопасно экранируем HTML символы (<, >, &) в оставшемся обычном тексте
     text = py_html.escape(text, quote=False)
+
+    # 7.1 Преобразуем ссылки Markdown [текст](url) в кликабельные Telegram ссылки <a href="url">текст</a>
+    def convert_md_link(m):
+        link_text = m.group(1).strip()
+        link_url = m.group(2).strip()
+        return f'<a href="{link_url}">{link_text}</a>'
+
+    text = re.sub(r'\[([^\]\n]+)\]\((https?://[^\s\)]+)\)', convert_md_link, text)
 
     # 8. Заголовки (#, ##, ###)
     text = re.sub(r'^[ \t]*#{1,6}\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
