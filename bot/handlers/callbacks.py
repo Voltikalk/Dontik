@@ -1,5 +1,6 @@
 import logging
 from aiogram import Router, html
+from aiogram.enums import ParseMode
 from aiogram.types import CallbackQuery, Message
 
 from bot.keyboards.inline import ConfirmCallback, ActionCallback, get_main_menu_keyboard
@@ -12,6 +13,7 @@ from bot.services.formatters import (
     format_all_items_list,
     format_stats_summary
 )
+from bot.emojis import E_CHECK, E_CROSS, E_BULB
 
 logger = logging.getLogger(__name__)
 
@@ -62,13 +64,13 @@ async def handle_confirm_callback(callback: CallbackQuery, callback_data: Confir
             station_str = f" (АЗС: {html.quote(station_name)})" if station_name else ""
 
             text = (
-                "✅ <b>Заправка успешно занесена в журнал!</b>\n\n"
+                f"{E_CHECK} <b>Заправка успешно занесена в журнал!</b>\n\n"
                 f"• <b>Объем:</b> <code>{liters:.1f} л</code>\n"
                 f"• <b>Сумма:</b> <code>{cost:,.2f} ₽</code>\n"
                 f"• <b>Пробег:</b> <code>{odometer_str}</code>{station_str}\n"
                 f"• <b>Номер записи:</b> #<code>{log.id}</code>"
             )
-            await callback.message.edit_text(text, reply_markup=None)
+            await callback.message.edit_text(text, reply_markup=None, parse_mode=ParseMode.HTML)
             await callback.answer("✅ Заправка сохранена!")
 
         elif action_type == "service":
@@ -90,12 +92,12 @@ async def handle_confirm_callback(callback: CallbackQuery, callback_data: Confir
             cost_str = f"\n• <b>Стоимость:</b> <code>{cost:,.2f} ₽</code>" if cost is not None else ""
 
             text = (
-                "✅ <b>Запись ТО / ремонта сохранена!</b>\n\n"
+                f"{E_CHECK} <b>Запись ТО / ремонта сохранена!</b>\n\n"
                 f"• <b>Работы:</b> <b>{html.quote(title)}</b>\n"
                 f"• <b>Пробег:</b> <code>{odometer_str}</code>{cost_str}\n"
                 f"• <b>Номер записи:</b> #<code>{log.id}</code>"
             )
-            await callback.message.edit_text(text, reply_markup=None)
+            await callback.message.edit_text(text, reply_markup=None, parse_mode=ParseMode.HTML)
             await callback.answer("✅ Запись ТО сохранена!")
 
         elif action_type == "item":
@@ -110,12 +112,12 @@ async def handle_confirm_callback(callback: CallbackQuery, callback_data: Confir
             )
 
             text = (
-                "✅ <b>Местоположение вещи запомнено!</b>\n\n"
+                f"{E_CHECK} <b>Местоположение вещи запомнено!</b>\n\n"
                 f"• <b>Предмет:</b> <b>{html.quote(item.item_name)}</b>\n"
                 f"• <b>Где лежит:</b> <code>{html.quote(item.location)}</code>\n\n"
-                "💡 Чтобы найти её в будущем, просто спросите в чате: <i>«Где лежит ...?»</i>"
+                f"{E_BULB} Чтобы найти её в будущем, просто спросите в чате: <i>«Где лежит ...?»</i>"
             )
-            await callback.message.edit_text(text, reply_markup=None)
+            await callback.message.edit_text(text, reply_markup=None, parse_mode=ParseMode.HTML)
             await callback.answer("✅ Вещь сохранена!")
 
 
@@ -134,7 +136,7 @@ async def handle_action_callback(callback: CallbackQuery, callback_data: ActionC
     if action.startswith("cancel_"):
         draft_id = action.replace("cancel_", "")
         pop_draft(draft_id)
-        await callback.message.edit_text("❌ <b>Действие отменено.</b> Запись не была сохранена.", reply_markup=None)
+        await callback.message.edit_text(f"{E_CROSS} <b>Действие отменено.</b> Запись не была сохранена.", reply_markup=None, parse_mode=ParseMode.HTML)
         await callback.answer("Отменено")
         return
 

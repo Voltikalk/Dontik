@@ -7,6 +7,16 @@ from aiogram.enums import ParseMode
 from aiogram.types import Message, LinkPreviewOptions
 
 from bot.database.models import FuelLog, ServiceLog, ItemLocation
+from bot.emojis import (
+    E_DROP,
+    E_WRENCH,
+    E_BOX,
+    E_CHART,
+    E_SEARCH,
+    E_BULB,
+    E_LOCATION,
+    E_VOICE_TEXT
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +31,7 @@ def format_fuel_card(data: Dict[str, Any], raw_text: str = "") -> str:
     price_per_l = round(cost / liters, 2) if liters and cost else 0.0
 
     lines = [
-        "⛽ <b>Распознана заправка автомобиля</b>\n",
+        f"{E_DROP} <b>Распознана заправка автомобиля</b>\n",
         f"• <b>Литры:</b> <code>{liters:.1f} л</code>",
         f"• <b>Стоимость:</b> <code>{cost:,.2f} ₽</code>",
         f"• <b>Цена за литр:</b> <code>{price_per_l:.2f} ₽</code>",
@@ -30,7 +40,7 @@ def format_fuel_card(data: Dict[str, Any], raw_text: str = "") -> str:
     ]
 
     if raw_text:
-        lines.append(f"<blockquote expandable>🗣 <b>Исходный текст:</b>\n{html.quote(raw_text)}</blockquote>\n")
+        lines.append(f"<blockquote expandable>{E_VOICE_TEXT} <b>Исходный текст:</b>\n{html.quote(raw_text)}</blockquote>\n")
 
     lines.append("<i>Подтвердите сохранение записи в журнал:</i>")
     return "\n".join(lines)
@@ -44,7 +54,7 @@ def format_service_card(data: Dict[str, Any], raw_text: str = "") -> str:
     notes = data.get("notes")
 
     lines = [
-        "🔧 <b>Распознано сервисное обслуживание / ремонт</b>\n",
+        f"{E_WRENCH} <b>Распознано сервисное обслуживание / ремонт</b>\n",
         f"• <b>Работа / Деталь:</b> <b>{html.quote(str(title))}</b>",
         f"• <b>Пробег:</b> <code>{odometer:,} км</code>".replace(",", " "),
     ]
@@ -56,7 +66,7 @@ def format_service_card(data: Dict[str, Any], raw_text: str = "") -> str:
 
     lines.append("")
     if raw_text:
-        lines.append(f"<blockquote expandable>🗣 <b>Исходный текст:</b>\n{html.quote(raw_text)}</blockquote>\n")
+        lines.append(f"<blockquote expandable>{E_VOICE_TEXT} <b>Исходный текст:</b>\n{html.quote(raw_text)}</blockquote>\n")
 
     lines.append("<i>Подтвердите сохранение записи в журнал:</i>")
     return "\n".join(lines)
@@ -68,13 +78,13 @@ def format_location_card(data: Dict[str, Any], raw_text: str = "") -> str:
     location = data.get("location", "Гараж")
 
     lines = [
-        "📦 <b>Запись в инвентарь гаража/дачи</b>\n",
+        f"{E_BOX} <b>Запись в инвентарь гаража/дачи</b>\n",
         f"• <b>Предмет:</b> <b>{html.quote(str(item_name))}</b>",
         f"• <b>Место хранения:</b> <code>{html.quote(str(location))}</code>\n"
     ]
 
     if raw_text:
-        lines.append(f"<blockquote expandable>🗣 <b>Исходный текст:</b>\n{html.quote(raw_text)}</blockquote>\n")
+        lines.append(f"<blockquote expandable>{E_VOICE_TEXT} <b>Исходный текст:</b>\n{html.quote(raw_text)}</blockquote>\n")
 
     lines.append("<i>Запомнить это место?</i>")
     return "\n".join(lines)
@@ -84,17 +94,17 @@ def format_found_items(items: List[ItemLocation], query: str) -> str:
     """Форматирует результаты поиска вещей в гараже."""
     if not items:
         return (
-            f"🔍 По запросу «<b>{html.quote(query)}</b>» ничего не найдено.\n\n"
-            "💡 Чтобы бот запомнил вещь, просто скажите или напишите, например:\n"
+            f"{E_SEARCH} По запросу «<b>{html.quote(query)}</b>» ничего не найдено.\n\n"
+            f"{E_BULB} Чтобы бот запомнил вещь, просто скажите или напишите, например:\n"
             "<i>«Положил домкрат в левый угол у ворот»</i>"
         )
 
-    lines = [f"📍 <b>Найдено в гараже / на даче (запрос: {html.quote(query)}):</b>\n"]
+    lines = [f"{E_LOCATION} <b>Найдено в гараже / на даче (запрос: {html.quote(query)}):</b>\n"]
     for idx, it in enumerate(items, 1):
         updated = it.updated_at.strftime("%d.%m.%Y")
         lines.append(
             f"{idx}. <b>{html.quote(it.item_name)}</b>\n"
-            f"   ↳ 📍 <code>{html.quote(it.location)}</code> <i>(обновлено: {updated})</i>"
+            f"   ↳ {E_LOCATION} <code>{html.quote(it.location)}</code> <i>(обновлено: {updated})</i>"
         )
     return "\n".join(lines)
 
@@ -102,21 +112,21 @@ def format_found_items(items: List[ItemLocation], query: str) -> str:
 def format_all_items_list(items: List[ItemLocation]) -> str:
     """Форматирует полный список вещей пользователя."""
     if not items:
-        return "📦 В гараже пока ничего не записано. Скажите или напишите, что и куда вы положили!"
+        return f"{E_BOX} В гараже пока ничего не записано. Скажите или напишите, что и куда вы положили!"
 
-    lines = ["📦 <b>Список вещей на хранении:</b>\n"]
+    lines = [f"{E_BOX} <b>Список вещей на хранении:</b>\n"]
     for idx, it in enumerate(items, 1):
         lines.append(f"{idx}. <b>{html.quote(it.item_name)}</b> — <code>{html.quote(it.location)}</code>")
-    lines.append("\n💡 <i>Чтобы найти конкретную вещь, спросите «Где лежит ...?»</i>")
+    lines.append(f"\n{E_BULB} <i>Чтобы найти конкретную вещь, спросите «Где лежит ...?»</i>")
     return "\n".join(lines)
 
 
 def format_fuel_history(logs: List[FuelLog]) -> str:
     """Форматирует историю заправок."""
     if not logs:
-        return "⛽ История заправок пока пуста."
+        return f"{E_DROP} История заправок пока пуста."
 
-    lines = ["⛽ <b>Последние заправки:</b>\n"]
+    lines = [f"{E_DROP} <b>Последние заправки:</b>\n"]
     for it in logs:
         date_str = it.date.strftime("%d.%m.%Y")
         station_str = f" ({html.quote(it.station_name)})" if it.station_name else ""
@@ -131,9 +141,36 @@ def format_fuel_history(logs: List[FuelLog]) -> str:
 def format_service_history(logs: List[ServiceLog]) -> str:
     """Форматирует историю ТО."""
     if not logs:
-        return "🔧 История обслуживания и ремонтов пока пуста."
+        return f"{E_WRENCH} История обслуживания и ремонтов пока пуста."
 
-    lines = ["🔧 <b>Последние записи ТО и сервиса:</b>\n"]
+    lines = [f"{E_WRENCH} <b>Последние записи ТО и сервиса:</b>\n"]
+    for it in logs:
+        date_str = it.date.strftime("%d.%m.%Y")
+        cost_str = f" на <code>{it.cost:,.0f} ₽</code>" if it.cost else ""
+        lines.append(
+            f"• <b>{date_str}</b>: <b>{html.quote(it.title)}</b>{cost_str} | "
+            f"<code>{it.odometer:,} км</code>".replace(",", " ")
+        )
+    return "\n".join(lines)
+
+
+def format_stats_summary(fuel_stats: Dict[str, Any]) -> str:
+    """Форматирует общую статистику по расходам."""
+    total_liters = fuel_stats.get("total_liters", 0.0)
+    total_cost = fuel_stats.get("total_cost", 0.0)
+    avg_price = fuel_stats.get("avg_price", 0.0)
+    avg_consumption = fuel_stats.get("avg_consumption", 0.0)
+
+    lines = [
+        f"{E_CHART} <b>Сводка расходов на топливо:</b>\n",
+        f"• <b>Всего заправлено:</b> <code>{total_liters:.1f} л</code>",
+        f"• <b>Общие затраты:</b> <code>{total_cost:,.2f} ₽</code>",
+        f"• <b>Средняя цена за литр:</b> <code>{avg_price:.2f} ₽</code>",
+    ]
+    if avg_consumption > 0:
+        lines.append(f"• <b>Средний расход:</b> <code>{avg_consumption:.1f} л / 100 км</code>")
+    return "\n".join(lines)
+
    # --- Словари символов Unicode для степеней и индексов ---
 SUPERSCRIPTS = {
     '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴',
@@ -465,7 +502,7 @@ def md_to_telegram_html(text: str) -> str:
         valid_tags.append(m.group(0))
         return f"XXVALIDTAG{len(valid_tags)-1}XX"
 
-    text = re.sub(r'</?(?:b|i|u|s|code|pre|blockquote|a)(?:\s+[^>]*?)?>', save_valid_tag, text, flags=re.IGNORECASE)
+    text = re.sub(r'</?(?:b|i|u|s|code|pre|blockquote|a|tg-emoji)(?:\s+[^>]*?)?>', save_valid_tag, text, flags=re.IGNORECASE)
 
     # 7. Безопасно экранируем HTML символы (<, >, &) в оставшемся обычном тексте
     text = py_html.escape(text, quote=False)

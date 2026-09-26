@@ -1,12 +1,13 @@
 import logging
 from aiogram import Router, html, F
+from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
 
 from bot.database.db import get_session
 from bot.database import crud
-from bot.keyboards.inline import get_tasks_keyboard, get_entry_confirm_keyboard
+from bot.keyboards.inline import get_tasks_keyboard, get_entry_confirm_keyboard, get_main_menu_keyboard
 from bot.services.intent_parser import parse_user_intent
 from bot.services.assistant import answer_query
 from bot.services.draft_store import save_draft
@@ -14,6 +15,29 @@ from bot.handlers.voice_handler import format_markdown_card
 from bot.handlers.states import GarageEntryState
 from bot.services.formatters import send_formatted_message
 from bot.services.agents import MultiAgentOrchestrator
+from bot.emojis import (
+    E_HELLO,
+    E_MIC,
+    E_NOTE,
+    E_GLOBE,
+    E_BULB,
+    E_DROP,
+    E_BOX,
+    E_DOC,
+    E_PHOTO,
+    E_BOT,
+    E_PIN,
+    E_SEARCH,
+    E_WRENCH,
+    E_CHART,
+    E_LIST,
+    E_REPEAT,
+    E_ALERT,
+    E_PARTY,
+    E_LOCATION,
+    E_THINK,
+    E_QUESTION,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,18 +56,18 @@ async def cmd_start(message: Message):
     safe_name = html.quote(first_name)
 
     text = (
-        f"👋 <b>Привет, {safe_name}!</b>\n\n"
+        f"{E_HELLO} <b>Привет, {safe_name}!</b>\n\n"
         "Я твой личный универсальный помощник, задачник и авто-гаражный ассистент.\n\n"
-        "🎙 <b>Ты можешь писать текстом или просто зажать микрофон:</b>\n"
-        "• 📝 <b>Задачи:</b> <i>«Запиши на завтра съездить на дачу, купить грабли»</i>\n"
-        "• 🌐 <b>Поиск в сети:</b> <i>«Какая погода завтра в Самаре?»</i> или <i>«Курс доллара»</i>\n"
-        "• 💡 <b>Советы и вопросы:</b> <i>«Как прокачать тормоза на Ниве?»</i>\n"
-        "• ⛽ <b>Заправки:</b> <i>«Заправил 35 литров на две тысячи, пробег 150 000»</i>\n"
-        "• 📦 <b>Вещи:</b> <i>«Положил домкрат под верстак»</i> / <i>«Где лежит домкрат?»</i>\n"
-        "• 📄 <b>Документы:</b> отправляй PDF, Word (.docx), Excel (.xlsx, .csv), TXT для анализа\n"
-        "• 🖼 <b>Фотографии:</b> присылай фото деталей, чеков, приборов, схем или предметов\n"
-        "• 🤖 <b>Субагенты:</b> <code>/agent</code> — запуск команды субагентов для глубокого разбора\n\n"
-        "📌 <b>Быстрые команды:</b>\n"
+        f"{E_MIC} <b>Ты можешь писать текстом или просто зажать микрофон:</b>\n"
+        f"• {E_NOTE} <b>Задачи:</b> <i>«Запиши на завтра съездить на дачу, купить грабли»</i>\n"
+        f"• {E_GLOBE} <b>Поиск в сети:</b> <i>«Какая погода завтра в Самаре?»</i> или <i>«Курс доллара»</i>\n"
+        f"• {E_BULB} <b>Советы и вопросы:</b> <i>«Как прокачать тормоза на Ниве?»</i>\n"
+        f"• {E_DROP} <b>Заправки:</b> <i>«Заправил 35 литров на две тысячи, пробег 150 000»</i>\n"
+        f"• {E_BOX} <b>Вещи:</b> <i>«Положил домкрат под верстак»</i> / <i>«Где лежит домкрат?»</i>\n"
+        f"• {E_DOC} <b>Документы:</b> отправляй PDF, Word (.docx), Excel (.xlsx, .csv), TXT для анализа\n"
+        f"• {E_PHOTO} <b>Фотографии:</b> присылай фото деталей, чеков, приборов, схем или предметов\n"
+        f"• {E_BOT} <b>Субагенты:</b> <code>/agent</code> — запуск команды субагентов для глубокого разбора\n\n"
+        f"{E_PIN} <b>Быстрые команды:</b>\n"
         "/agent — глубокое исследование задачи командой субагентов\n"
         "/tasks — список актуальных задач с кнопками выполнения\n"
         "/stats — сводка по заправкам и ремонтам\n"
@@ -51,7 +75,7 @@ async def cmd_start(message: Message):
         "/clear — сбросить контекст диалога\n"
         "/help — подробная справка"
     )
-    await message.answer(text)
+    await message.answer(text, reply_markup=get_main_menu_keyboard())
 
 
 @router.message(Command("agent", "research"))
@@ -65,13 +89,13 @@ async def cmd_agent(message: Message):
 
     if len(parts) < 2 or not parts[1].strip():
         help_text = (
-            "🤖 <b>Команда субагентов (Multi-Agent System)</b>\n\n"
+            f"{E_BOT} <b>Команда субагентов (Multi-Agent System)</b>\n\n"
             "Запускает совместную работу специализированных субагентов для глубокого решения задачи:\n"
-            "• 🔍 <b>Поиск и аналитика</b> — мониторинг цен, артикулов и предложений в сети\n"
-            "• 🔧 <b>Технический эксперт</b> — регламенты, инструмент, моменты затяжки, нюансы ремонта\n"
-            "• 📊 <b>Сметы и расчеты</b> — финансовая калькуляция, аудит расходов, сравнение смет\n"
-            "• 📋 <b>Планировщик</b> — пошаговый чек-лист этапов и временные оценки\n\n"
-            "💡 <b>Примеры запуска:</b>\n"
+            f"• {E_SEARCH} <b>Поиск и аналитика</b> — мониторинг цен, артикулов и предложений в сети\n"
+            f"• {E_WRENCH} <b>Технический эксперт</b> — регламенты, инструмент, моменты затяжки, нюансы ремонта\n"
+            f"• {E_CHART} <b>Сметы и расчеты</b> — финансовая калькуляция, аудит расходов, сравнение смет\n"
+            f"• {E_LIST} <b>Планировщик</b> — пошаговый чек-лист этапов и временные оценки\n\n"
+            f"{E_BULB} <b>Примеры запуска:</b>\n"
             "<code>/agent Замена сцепления на ВАЗ 2121 Нива: регламент, цены на комплект Valeo и пошаговый план</code>\n\n"
             "<code>/agent Капитальный ремонт дачной беседки: смета материалов, закупка и этапы</code>"
         )
@@ -79,7 +103,7 @@ async def cmd_agent(message: Message):
         return
 
     task = parts[1].strip()
-    status_msg = await message.answer("🤖 <i>Запуск команды субагентов...</i>")
+    status_msg = await message.answer(f"{E_BOT} <i>Запуск команды субагентов...</i>")
 
     async def update_progress(msg: str):
         try:
@@ -119,7 +143,7 @@ async def cmd_agent(message: Message):
             await status_msg.delete()
         except Exception:
             pass
-        await message.answer(f"⚠️ Ошибка при выполнении задачи субагентами: {e}")
+        await message.answer(f"{E_ALERT} <b>Ошибка при выполнении задачи субагентами:</b> {html.quote(str(e))}")
 
 
 @router.message(Command("stats"))
@@ -134,20 +158,20 @@ async def cmd_stats(message: Message):
         last_fuel = await crud.get_last_fuel_log(session, user_id=user_id)
         last_service = await crud.get_last_service_log(session, user_id=user_id)
 
-    lines = ["📊 <b>Сводка по автомобилю:</b>\n"]
+    lines = [f"{E_CHART} <b>Сводка по автомобилю:</b>\n"]
 
     # Блок последней заправки
     if last_fuel:
         fuel_date = last_fuel.date.strftime("%d.%m.%Y")
         station_str = f" (АЗС: {html.quote(last_fuel.station_name)})" if last_fuel.station_name else ""
         lines.append(
-            f"⛽ <b>Последняя заправка ({fuel_date}):</b>\n"
+            f"{E_DROP} <b>Последняя заправка ({fuel_date}):</b>\n"
             f"• Объем: <code>{last_fuel.liters:.1f} л</code>\n"
             f"• Стоимость: <code>{last_fuel.cost:,.0f} ₽</code>\n"
             f"• Пробег: <code>{last_fuel.odometer:,} км</code>{station_str}\n".replace(",", " ")
         )
     else:
-        lines.append("⛽ <b>Последняя заправка:</b> <i>записей пока нет</i>\n")
+        lines.append(f"{E_DROP} <b>Последняя заправка:</b> <i>записей пока нет</i>\n")
 
     # Блок последнего сервиса / ТО
     if last_service:
@@ -155,14 +179,14 @@ async def cmd_stats(message: Message):
         cost_str = f" на <code>{last_service.cost:,.0f} ₽</code>" if last_service.cost else ""
         notes_str = f"\n• Заметки: <i>{html.quote(last_service.notes)}</i>" if last_service.notes else ""
         lines.append(
-            f"🔧 <b>Последнее ТО / ремонт ({service_date}):</b>\n"
+            f"{E_WRENCH} <b>Последнее ТО / ремонт ({service_date}):</b>\n"
             f"• Работы: <b>{html.quote(last_service.title)}</b>{cost_str}\n"
             f"• Пробег: <code>{last_service.odometer:,} км</code>{notes_str}\n".replace(",", " ")
         )
     else:
-        lines.append("🔧 <b>Последнее ТО / ремонт:</b> <i>записей пока нет</i>\n")
+        lines.append(f"{E_WRENCH} <b>Последнее ТО / ремонт:</b> <i>записей пока нет</i>\n")
 
-    await message.answer("\n".join(lines))
+    await message.answer("\n".join(lines), reply_markup=get_main_menu_keyboard())
 
 
 @router.message(Command("tasks", "todo"))
@@ -178,13 +202,13 @@ async def cmd_tasks(message: Message):
 
     if not tasks:
         await message.answer(
-            "🎉 <b>Список задач пуст!</b>\n\n"
+            f"{E_PARTY} <b>Список задач пуст!</b>\n\n"
             "Чтобы добавить дело или покупку, просто скажите голосовым сообщением, например:\n"
             "<i>«Запиши на завтра съездить на дачу, купить грабли»</i>"
         )
         return
 
-    lines = ["📋 <b>Твой актуальный список дел и задач:</b>\n"]
+    lines = [f"{E_LIST} <b>Твой актуальный список дел и задач:</b>\n"]
     for idx, t in enumerate(tasks, 1):
         due_str = f" <i>(срок: {html.quote(t.due_date)})</i>" if t.due_date else ""
         lines.append(f"{idx}. <b>{html.quote(t.title)}</b>{due_str}")
@@ -205,17 +229,17 @@ async def cmd_items(message: Message):
 
     if not items:
         await message.answer(
-            "📦 <b>В гараже пока ничего не записано.</b>\n\n"
+            f"{E_BOX} <b>В гараже пока ничего не записано.</b>\n\n"
             "Чтобы сохранить местоположение вещи, просто скажите голосовым сообщением, например:\n"
             "<i>«Положил домкрат под верстак»</i>"
         )
         return
 
-    lines = ["📦 <b>Список вещей на хранении:</b>\n"]
+    lines = [f"{E_BOX} <b>Список вещей на хранении:</b>\n"]
     for idx, it in enumerate(items, 1):
         lines.append(f"{idx}. <b>{html.quote(it.item_name)}</b> — <code>{html.quote(it.location)}</code>")
-    lines.append("\n💡 <i>Чтобы найти конкретную вещь, спросите голосовым: «Где лежит ...?»</i>")
-    await message.answer("\n".join(lines))
+    lines.append(f"\n{E_BULB} <i>Чтобы найти конкретную вещь, спросите голосовым: «Где лежит ...?»</i>")
+    await message.answer("\n".join(lines), reply_markup=get_main_menu_keyboard())
 
 
 @router.message(Command("help"))
@@ -225,36 +249,36 @@ async def cmd_help(message: Message):
     Справочная информация и примеры использования.
     """
     text = (
-        "💡 <b>Как пользоваться ботом «Авто-Гараж и Персональный Ассистент»:</b>\n\n"
-        "🎙 <b>Голосовое и текстовое управление:</b>\n"
+        f"{E_BULB} <b>Как пользоваться ботом «Авто-Гараж и Персональный Ассистент»:</b>\n\n"
+        f"{E_MIC} <b>Голосовое и текстовое управление:</b>\n"
         "Вы можете как зажать кнопку микрофона, так и просто написать текст в чат:\n\n"
-        "📝 <b>Задачи и напоминания:</b>\n"
+        f"{E_NOTE} <b>Задачи и напоминания:</b>\n"
         "• <i>«Запиши на завтра съездить на работу к Николаю Викторовичу»</i>\n"
         "• <i>«Напомни в субботу поменять масло»</i>\n"
         "• <i>«Какие у меня дела?»</i> (выведет список задач с кнопками завершения)\n\n"
-        "🌐 <b>Поиск в интернете (подключается автоматически):</b>\n"
+        f"{E_GLOBE} <b>Поиск в интернете (подключается автоматически):</b>\n"
         "• <i>«Какая погода завтра в Москве?»</i>\n"
         "• <i>«Найди актуальный курс доллара и евро»</i>\n"
         "• <i>«Сколько стоит резина 205/55 R16?»</i>\n\n"
-        "💡 <b>Вопросы, математика и экспертные советы:</b>\n"
+        f"{E_BULB} <b>Вопросы, математика и экспертные советы:</b>\n"
         "• <i>«Реши уравнение x^2 = 38»</i>\n"
         "• <i>«А почему два корня?»</i> (бот помнит контекст прошлых вопросов!)\n"
         "• <i>«Как прокачать тормоза на классике?»</i>\n\n"
-        "📄 <b>Анализ документов (PDF, Word, Excel, CSV, TXT):</b>\n"
+        f"{E_DOC} <b>Анализ документов (PDF, Word, Excel, CSV, TXT):</b>\n"
         "• Отправьте файл боту (можно с вопросом в подписи, например: <i>«Сделай краткое резюме»</i>, <i>«Посчитай итог по расходам»</i>)\n"
         "• Бот извлечет текст и таблицы и даст подробный ответ.\n\n"
-        "🖼 <b>Распознавание фотографий (Vision):</b>\n"
+        f"{E_PHOTO} <b>Распознавание фотографий (Vision):</b>\n"
         "• Отправьте фото автозапчасти, приборной панели, чека, схемы или инструмента — бот определит детали, распознает текст, маркировку и ответит на вопросы.\n\n"
-        "⛽ <b>Заправки автомобиля:</b>\n"
+        f"{E_DROP} <b>Заправки автомобиля:</b>\n"
         "• <i>«Заправил сорок литров на 2500 рублей, пробег 155 000, Газпромнефть»</i>\n\n"
-        "🔧 <b>Сервис и ремонты:</b>\n"
+        f"{E_WRENCH} <b>Сервис и ремонты:</b>\n"
         "• <i>«Поменял тормозные диски и колодки, отдал 8000 руб, пробег 156 000»</i>\n\n"
-        "📦 <b>Поиск и хранение вещей:</b>\n"
+        f"{E_BOX} <b>Поиск и хранение вещей:</b>\n"
         "• <i>«Положил зарядник для аккумулятора в синий ящик»</i>\n"
         "• <i>«Где лежит зарядник?»</i>\n\n"
-        "🤖 <b>Команда субагентов (Multi-Agent System):</b>\n"
+        f"{E_BOT} <b>Команда субагентов (Multi-Agent System):</b>\n"
         "• <code>/agent &lt;задача&gt;</code> — запускает команду узких специалистов (поиск цен, техэкспертиза, расчет сметы и пошаговый план) для глубокого решения комплексных задач.\n\n"
-        "📌 <b>Быстрые команды из меню ввода:</b>\n"
+        f"{E_PIN} <b>Быстрые команды из меню ввода:</b>\n"
         "/agent — запуск команды субагентов для глубокого разбора\n"
         "/tasks — актуальный список дел\n"
         "/stats — сводка по заправкам и ремонтам\n"
@@ -263,7 +287,7 @@ async def cmd_help(message: Message):
         "/help — подробная справка\n"
         "/start — главное меню"
     )
-    await message.answer(text)
+    await message.answer(text, reply_markup=get_main_menu_keyboard())
 
 
 @router.message(Command("clear"))
@@ -276,7 +300,7 @@ async def cmd_clear_history(message: Message):
     user_id = message.from_user.id
     async with get_session() as session:
         await crud.clear_chat_history(session, user_id=user_id)
-    await message.answer("🔄 <b>Память диалога очищена.</b>\nЗадавай новый вопрос — я готов к новой теме!")
+    await message.answer(f"{E_REPEAT} <b>Память диалога очищена.</b>\nЗадавай новый вопрос — я готов к новой теме!")
 
 
 @router.message(F.text & ~F.text.startswith("/"))
@@ -339,10 +363,10 @@ async def handle_text_message(message: Message, state: FSMContext):
             results = []
             for it in found:
                 date_str = it.updated_at.strftime("%d.%m.%Y")
-                results.append(f"🔍 Найдено: <b>{html.quote(it.item_name)}</b> лежит в <code>{html.quote(it.location)}</code> (обновлено {date_str})")
+                results.append(f"{E_SEARCH} Найдено: <b>{html.quote(it.item_name)}</b> лежит в <code>{html.quote(it.location)}</code> (обновлено {date_str})")
             await message.answer("\n\n".join(results))
         else:
-            await message.answer("Ничего похожего в гараже не нашел.")
+            await message.answer(f"{E_SEARCH} Ничего похожего в гараже не нашел.")
 
     # Ветка: Список задач
     elif intent == "task_list":
@@ -363,7 +387,7 @@ async def handle_text_message(message: Message, state: FSMContext):
         await message.answer(
             card_text,
             reply_markup=get_entry_confirm_keyboard(draft_id=draft_id),
-            parse_mode="Markdown"
+            parse_mode=ParseMode.HTML
         )
 
     # Ветка: Универсальный ассистент и веб-поиск
@@ -372,7 +396,7 @@ async def handle_text_message(message: Message, state: FSMContext):
         search_query = data.get("search_query")
         user_query = data.get("user_query") or raw_text
 
-        status_text = "🔍 <i>Ищу актуальную информацию в интернете...</i>" if needs_web else "🤔 <i>Думаю над ответом...</i>"
+        status_text = f"{E_SEARCH} <i>Ищу актуальную информацию в интернете...</i>" if needs_web else f"{E_THINK} <i>Думаю над ответом...</i>"
         status_msg = await message.answer(status_text)
         try:
             answer = await answer_query(
@@ -398,11 +422,11 @@ async def handle_text_message(message: Message, state: FSMContext):
                 await status_msg.delete()
             except Exception:
                 pass
-            await message.answer("⚠️ Не удалось получить ответ. Попробуй переформулировать вопрос.")
+            await message.answer(f"{E_ALERT} Не удалось получить ответ. Попробуй переформулировать вопрос.")
 
     # Ветка: Общий диалог / неопределенный текст
     else:
-        status_msg = await message.answer("🤔 <i>Секунду...</i>")
+        status_msg = await message.answer(f"{E_THINK} <i>Секунду...</i>")
         try:
             answer = await answer_query(user_query=raw_text, needs_web=False, history=history)
             try:
@@ -421,8 +445,4 @@ async def handle_text_message(message: Message, state: FSMContext):
                 await status_msg.delete()
             except Exception:
                 pass
-            await message.answer("Я не совсем понял, что требуется сделать. Напиши вопрос подробнее или нажми /help.")
-
-
-
-
+            await message.answer(f"{E_QUESTION} Я не совсем понял, что требуется сделать. Напиши вопрос подробнее или нажми /help.")

@@ -1,6 +1,7 @@
 import re
 import logging
-from aiogram import Router, F
+from aiogram import Router, F, html
+from aiogram.enums import ParseMode
 from aiogram.types import CallbackQuery, Message
 from aiogram.fsm.context import FSMContext
 
@@ -8,6 +9,12 @@ from bot.database.db import get_session
 from bot.database import crud
 from bot.services.draft_store import pop_draft
 from bot.keyboards.inline import get_tasks_keyboard
+from bot.emojis import (
+    E_CHECK,
+    E_CROSS,
+    E_LIST,
+    E_PARTY
+)
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +132,7 @@ async def process_confirm_entry(callback: CallbackQuery, state: FSMContext):
         await state.clear()
         return
 
-    result_text = "✅ Записано в базу!"
+    result_text = f"{E_CHECK} <b>Записано в базу!</b>"
 
     async with get_session() as session:
         if intent == "fuel":
@@ -139,7 +146,7 @@ async def process_confirm_entry(callback: CallbackQuery, state: FSMContext):
             if prev_log and prev_log.odometer and odometer > prev_log.odometer and liters > 0:
                 distance = odometer - prev_log.odometer
                 consumption = (liters / distance) * 100
-                result_text = f"✅ Записано в базу!\nРасход: {consumption:.1f} л / 100 км"
+                result_text = f"{E_CHECK} <b>Записано в базу!</b>\nРасход: <code>{consumption:.1f} л / 100 км</code>"
 
             await crud.add_fuel_log(
                 session=session,
@@ -186,15 +193,15 @@ async def process_confirm_entry(callback: CallbackQuery, state: FSMContext):
                 title=title,
                 due_date=due_date
             )
-            due_str = f" (срок: {due_date})" if due_date else ""
-            result_text = f"✅ Задача «{title}»{due_str} записана в список дел!"
+            due_str = f" <i>(срок: {html.quote(due_date)})</i>" if due_date else ""
+            result_text = f"{E_CHECK} Задача «<b>{html.quote(title)}</b>»{due_str} записана в список дел!"
 
     # Очищаем FSM состояние
     await state.clear()
 
     # Редактируем сообщение с карточкой
     try:
-        await callback.message.edit_text(result_text, reply_markup=None)
+        await callback.message.edit_text(result_text, reply_markup=None, parse_mode=ParseMode.HTML)
     except Exception:
         pass
     await callback.answer("✅ Успешно сохранено!")
@@ -216,7 +223,7 @@ async def process_cancel_entry(callback: CallbackQuery, state: FSMContext):
 
     await state.clear()
     try:
-        await callback.message.edit_text("❌ Запись отменена", reply_markup=None)
+        await callback.message.edit_text(f"{E_CROSS} <b>Запись отменена</b>", reply_markup=None, parse_mode=ParseMode.HTML)
     except Exception:
         pass
     await callback.answer("Отменено")
@@ -242,18 +249,19 @@ async def process_done_task(callback: CallbackQuery):
         if success:
             tasks = await crud.get_active_tasks(session, user_id=user_id)
             if tasks:
-                lines = ["📋 <b>Твой актуальный список дел и задач:</b>\n"]
+                lines = [f"{E_LIST} <b>Твой актуальный список дел и задач:</b>\n"]
                 for idx, t in enumerate(tasks, 1):
-                    due_str = f" <i>(срок: {t.due_date})</i>" if t.due_date else ""
-                    lines.append(f"{idx}. <b>{t.title}</b>{due_str}")
+                    due_str = f" <i>(срок: {html.quote(t.due_date)})</i>" if t.due_date else ""
+                    lines.append(f"{idx}. <b>{html.quote(t.title)}</b>{due_str}")
                 kb = get_tasks_keyboard(tasks)
-                await callback.message.edit_text("\n".join(lines), reply_markup=kb, parse_mode="HTML")
+                await callback.message.edit_text("\n".join(lines), reply_markup=kb, parse_mode=ParseMode.HTML)
             else:
                 await callback.message.edit_text(
-                    "🎉 <b>Все задачи выполнены! Отличная работа.</b>",
+                    f"{E_PARTY} <b>Все задачи выполнены! Отличная работа.</b>",
                     reply_markup=None,
-                    parse_mode="HTML"
+                    parse_mode=ParseMode.HTML
                 )
             await callback.answer("✅ Задача выполнена!")
         else:
             await callback.answer("Задача уже была отмечена или удалена.", show_alert=True)
+

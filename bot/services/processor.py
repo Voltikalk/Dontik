@@ -17,6 +17,12 @@ from bot.services.formatters import (
     format_service_history
 )
 from bot.keyboards.inline import get_confirm_keyboard, get_main_menu_keyboard
+from bot.emojis import (
+    E_ALERT,
+    E_THINK,
+    E_BULB,
+    E_VOICE_TEXT
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +40,7 @@ async def process_user_intent(message: Message, text: str, is_voice: bool = Fals
     except Exception as e:
         logger.error(f"Ошибка вызова LLM парсера: {e}", exc_info=True)
         await message.answer(
-            "⚠️ <b>Произошла ошибка при обращении к искусственному интеллекту.</b>\n"
+            f"{E_ALERT} <b>Произошла ошибка при обращении к искусственному интеллекту.</b>\n"
             "Пожалуйста, проверьте настройки ключа <code>GROQ_API_KEY</code> в файле <code>.env</code>."
         )
         return
@@ -67,13 +73,13 @@ async def process_user_intent(message: Message, text: str, is_voice: bool = Fals
     else:
         # Неизвестный интент или общий вопрос
         reply_text = (
-            "🤔 Не удалось однозначно распознать команду для автомобиля или гаража.\n\n"
-            "💡 <b>Вы можете сказать или написать:</b>\n"
+            f"{E_THINK} Не удалось однозначно распознать команду для автомобиля или гаража.\n\n"
+            f"{E_BULB} <b>Вы можете сказать или написать:</b>\n"
             "• <i>«Заправил 35 литров на 2000 рублей, пробег 115000»</i>\n"
             "• <i>«Поменял свечи зажигания, отдал 3000 руб»</i>\n"
             "• <i>«Положил компрессор в багажник»</i>\n"
             "• <i>«Где лежит компрессор?»</i>"
         )
         if is_voice and raw_quote:
-            reply_text = f"<blockquote expandable>🗣 <b>Распознано:</b>\n{html.quote(raw_quote)}</blockquote>\n\n{reply_text}"
+            reply_text = f"<blockquote expandable>{E_VOICE_TEXT} <b>Распознано:</b>\n{html.quote(raw_quote)}</blockquote>\n\n{reply_text}"
         await message.answer(reply_text, reply_markup=get_main_menu_keyboard())

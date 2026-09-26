@@ -13,6 +13,12 @@ from bot.services.file_parser import extract_text_from_file, parse_pdf_smart
 from bot.services.vision import analyze_image
 from bot.services.assistant import answer_query
 from bot.services.formatters import send_formatted_message
+from bot.emojis import (
+    E_DOC,
+    E_PHOTO,
+    E_LOCK,
+    E_ALERT
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +33,7 @@ async def handle_document_message(message: Message, bot: Bot):
     user_id = message.from_user.id
 
     if settings.ALLOWED_TELEGRAM_IDS and user_id not in settings.ALLOWED_TELEGRAM_IDS:
-        await message.answer("⛔ Доступ ограничен. Ваш ID отсутствует в списке доверенных.")
+        await message.answer(f"{E_LOCK} <b>Доступ ограничен.</b> Ваш ID отсутствует в списке доверенных.")
         return
 
     doc = message.document
@@ -35,10 +41,10 @@ async def handle_document_message(message: Message, bot: Bot):
     file_size_mb = (doc.file_size or 0) / (1024 * 1024)
 
     if file_size_mb > 20:
-        await message.answer("⚠️ Размер файла превышает 20 МБ. Telegram Bot API не позволяет скачивать файлы такого размера.")
+        await message.answer(f"{E_ALERT} Размер файла превышает 20 МБ. Telegram Bot API не позволяет скачивать файлы такого размера.")
         return
 
-    status_msg = await message.answer(f"📄 <i>Читаю и анализирую «{html.quote(filename)}»...</i>")
+    status_msg = await message.answer(f"{E_DOC} <i>Читаю и анализирую «{html.quote(filename)}»...</i>")
 
     temp_dir = Path("temp")
     temp_dir.mkdir(parents=True, exist_ok=True)
@@ -146,7 +152,7 @@ async def handle_document_message(message: Message, bot: Bot):
             await status_msg.delete()
         except Exception:
             pass
-        await message.answer(f"⚠️ Не удалось обработать файл «{html.quote(filename)}»: {e}")
+        await message.answer(f"{E_ALERT} Не удалось обработать файл «{html.quote(filename)}»: {html.quote(str(e))}")
     finally:
         if temp_file.exists():
             try:
@@ -163,12 +169,12 @@ async def handle_photo_message(message: Message, bot: Bot):
     user_id = message.from_user.id
 
     if settings.ALLOWED_TELEGRAM_IDS and user_id not in settings.ALLOWED_TELEGRAM_IDS:
-        await message.answer("⛔ Доступ ограничен. Ваш ID отсутствует в списке доверенных.")
+        await message.answer(f"{E_LOCK} <b>Доступ ограничен.</b> Ваш ID отсутствует в списке доверенных.")
         return
 
     # Берем фото в наилучшем доступном разрешении (последний элемент в массиве)
     photo = message.photo[-1]
-    status_msg = await message.answer("🖼 <i>Анализирую изображение...</i>")
+    status_msg = await message.answer(f"{E_PHOTO} <i>Анализирую изображение...</i>")
 
     try:
         buf = io.BytesIO()
@@ -199,4 +205,4 @@ async def handle_photo_message(message: Message, bot: Bot):
             await status_msg.delete()
         except Exception:
             pass
-        await message.answer(f"⚠️ Не удалось распознать фотографию: {e}")
+        await message.answer(f"{E_ALERT} Не удалось распознать фотографию: {html.quote(str(e))}")

@@ -15,6 +15,12 @@ from bot.services.connectors.email_connector import (
 from bot.services.formatters import send_formatted_message
 from bot.database.db import get_session
 from bot.database import crud
+from bot.emojis import (
+    E_INBOX,
+    E_OUTBOX,
+    E_CHECK,
+    E_ALERT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +49,7 @@ async def cmd_check_mail(message: Message):
 
     if not is_email_configured():
         help_text = (
-            "✉️ <b>Коннектор электронной почты</b>\n\n"
+            f"{E_INBOX} <b>Коннектор электронной почты</b>\n\n"
             "Почтовый ящик еще не подключен в файле конфигурации <code>.env</code>.\n\n"
             "<b>Как подключить за 1 минуту:</b>\n"
             "1. В почте (Mail.ru, Яндекс, Gmail) зайдите в Настройки → Безопасность → <b>Пароли для внешних приложений</b> (App Passwords) и создайте отдельный пароль для бота.\n"
@@ -55,13 +61,13 @@ async def cmd_check_mail(message: Message):
         await message.answer(help_text)
         return
 
-    status_msg = await message.answer("📬 <i>Подключаюсь к почтовому серверу и проверяю входящие...</i>")
+    status_msg = await message.answer(f"{E_INBOX} <i>Подключаюсь к почтовому серверу и проверяю входящие...</i>")
 
     try:
         emails = await check_inbox(limit=5, unread_only=False)
 
         if not emails:
-            await status_msg.edit_text("📭 <b>В папке «Входящие» писем не найдено.</b>")
+            await status_msg.edit_text(f"{E_INBOX} <b>В папке «Входящие» писем не найдено.</b>")
             return
 
         # Формируем текст для саммари через LLM
@@ -74,6 +80,7 @@ async def cmd_check_mail(message: Message):
                 f"Тема: {em['subject']}\n"
                 f"Текст:\n{em['body']}\n"
             )
+        full_raw_text = "\n\n".join(email_items_text)
 
         client = AsyncOpenAI(
             base_url="https://api.groq.com/openai/v1",
@@ -96,7 +103,7 @@ async def cmd_check_mail(message: Message):
         except Exception:
             pass
 
-        final_answer = f"📬 <b>Сводка последних писем ({len(emails)} шт.):</b>\n\n{summary}"
+        final_answer = f"{E_INBOX} <b>Сводка последних писем ({len(emails)} шт.):</b>\n\n{summary}"
         await send_formatted_message(message, final_answer)
 
         # Сохраняем в память диалога
@@ -110,7 +117,7 @@ async def cmd_check_mail(message: Message):
             await status_msg.delete()
         except Exception:
             pass
-        await message.answer(f"⚠️ Ошибка при подключении к почтовому серверу: {e}")
+        await message.answer(f"{E_ALERT} Ошибка при подключении к почтовому серверу: {html.quote(str(e))}")
 
 
 @router.message(Command("sendmail"))
@@ -120,7 +127,7 @@ async def cmd_send_mail(message: Message):
     Формат: /sendmail to@example.com | Тема | Текст
     """
     if not is_email_configured():
-        await message.answer("⚠️ Почта не настроена в <code>.env</code> (нужны <code>EMAIL_USER</code> и <code>EMAIL_PASSWORD</code>).")
+        await message.answer(f"{E_ALERT} Почта не настроена в <code>.env</code> (нужны <code>EMAIL_USER</code> и <code>EMAIL_PASSWORD</code>).")
         return
 
     text = (message.text or "").strip()
@@ -128,7 +135,7 @@ async def cmd_send_mail(message: Message):
 
     if len(parts) < 2 or "|" not in parts[1]:
         help_text = (
-            "✉️ <b>Как отправить письмо через бота:</b>\n\n"
+            f"{E_OUTBOX} <b>Как отправить письмо через бота:</b>\n\n"
             "Используйте формат через вертикальную черту <code>|</code>:\n"
             "<code>/sendmail poluchatel@mail.ru | Тема письма | Текст вашего сообщения</code>\n\n"
             "<b>Пример:</b>\n"
@@ -141,17 +148,17 @@ async def cmd_send_mail(message: Message):
     tokens = [t.strip() for t in payload.split("|")]
 
     if len(tokens) < 3:
-        await message.answer("⚠️ Укажите все три части через <code>|</code>: адрес получателя, тему и текст.")
+        await message.answer(f"{E_ALERT} Укажите все три части через <code>|</code>: адрес получателя, тему и текст.")
         return
 
     to_addr, subject, body = tokens[0], tokens[1], tokens[2]
 
     # Базовая валидация email
     if not re.match(r"^[^@]+@[^@]+\.[^@]+$", to_addr):
-        await message.answer(f"⚠️ Некорректный email адрес получателя: <code>{html.quote(to_addr)}</code>")
+        await message.answer(f"{E_ALERT} Некорректный email адрес получателя: <code>{html.quote(to_addr)}</code>")
         return
 
-    status_msg = await message.answer(f"📤 <i>Отправляю письмо на {html.quote(to_addr)}...</i>")
+    status_msg = await message.answer(f"{E_OUTBOX} <i>Отправляю письмо на {html.quote(to_addr)}...</i>")
 
     try:
         await send_email(to_address=to_addr, subject=subject, text_content=body)
@@ -160,7 +167,7 @@ async def cmd_send_mail(message: Message):
         except Exception:
             pass
         await message.answer(
-            f"✅ <b>Письмо успешно отправлено!</b>\n\n"
+            f"{E_CHECK} <b>Письмо успешно отправлено!</b>\n\n"
             f"<b>Кому:</b> <code>{html.quote(to_addr)}</code>\n"
             f"<b>Тема:</b> {html.quote(subject)}\n"
             f"<b>Отправитель:</b> {html.quote(settings.EMAIL_USER or '')}"
@@ -171,4 +178,4 @@ async def cmd_send_mail(message: Message):
             await status_msg.delete()
         except Exception:
             pass
-        await message.answer(f"⚠️ Не удалось отправить письмо: {e}")
+        await message.answer(f"{E_ALERT} Не удалось отправить письмо: {html.quote(str(e))}")

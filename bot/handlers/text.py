@@ -5,6 +5,7 @@ from aiogram.types import Message
 
 from bot.services.processor import process_user_intent
 from bot.keyboards.inline import get_main_menu_keyboard
+from bot.emojis import E_SPEEDOMETER
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ async def handle_text_message(message: Message, bot: Bot):
     # Быстрые команды на русском
     lowered = text.lower()
     if lowered in {"меню", "кнопки", "панель"}:
-        await message.answer("🚘 <b>Главное меню:</b>", reply_markup=get_main_menu_keyboard())
+        await message.answer(f"{E_SPEEDOMETER} <b>Главное меню:</b>", reply_markup=get_main_menu_keyboard())
         return
 
     # Индикация размышления ассистента

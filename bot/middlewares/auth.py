@@ -6,6 +6,7 @@ from aiogram.types import TelegramObject, Message, CallbackQuery
 from bot.config import settings
 from bot.database.db import get_session
 from bot.database.crud import get_or_create_user
+from bot.emojis import E_LOCK
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ class AccessMiddleware(BaseMiddleware):
             logger.warning(f"Попытка несанкционированного доступа от пользователя {user_id} ({user.full_name})")
             if isinstance(event, Message):
                 await event.answer(
-                    "⛔ <b>Доступ ограничен</b>\n\n"
+                    f"{E_LOCK} <b>Доступ ограничен</b>\n\n"
                     f"Ваш Telegram ID: <code>{user_id}</code>\n"
                     "Для получения доступа обратитесь к владельцу бота."
                 )

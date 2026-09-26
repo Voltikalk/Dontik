@@ -7,6 +7,7 @@ from aiogram.types import Message
 
 from bot.services.speech_to_text import transcribe_voice
 from bot.services.processor import process_user_intent
+from bot.emojis import E_MUTE, E_ALERT
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ async def handle_voice_message(message: Message, bot: Bot):
         transcript = await transcribe_voice(file_path=temp_file_path)
 
         if not transcript or not transcript.strip():
-            await message.answer("🔇 Не удалось расслышать слова. Попробуйте записать аудио еще раз чуть громче.")
+            await message.answer(f"{E_MUTE} Не удалось расслышать слова. Попробуйте записать аудио еще раз чуть громче.")
             return
 
         # Обрабатываем распознанный текст через универсальный процессор
@@ -50,6 +51,6 @@ async def handle_voice_message(message: Message, bot: Bot):
     except Exception as e:
         logger.error(f"Ошибка при обработке голосового сообщения: {e}", exc_info=True)
         await message.answer(
-            "⚠️ <b>Произошла ошибка при обработке голосового сообщения.</b>\n"
+            f"{E_ALERT} <b>Произошла ошибка при обработке голосового сообщения.</b>\n"
             "Убедитесь, что указан корректный <code>GROQ_API_KEY</code> в <code>.env</code>."
         )

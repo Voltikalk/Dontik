@@ -2,7 +2,8 @@ import os
 import uuid
 import logging
 from pathlib import Path
-from aiogram import Router, F, Bot
+from aiogram import Router, F, Bot, html
+from aiogram.enums import ParseMode
 from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
 
@@ -16,6 +17,21 @@ from bot.handlers.states import GarageEntryState
 from bot.services.draft_store import save_draft
 from bot.services.assistant import answer_query
 from bot.services.formatters import send_formatted_message
+from bot.emojis import (
+    E_DROP,
+    E_WRENCH,
+    E_BOX,
+    E_NOTE,
+    E_LIST,
+    E_MIC,
+    E_MUTE,
+    E_LOCK,
+    E_SEARCH,
+    E_ALERT,
+    E_PARTY,
+    E_THINK,
+    E_QUESTION,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +39,7 @@ router = Router(name="voice_handler_router")
 
 
 def format_markdown_card(intent: str, data: dict) -> str:
-    """Форматирует карточку с распознанными данными в Markdown."""
+    """Форматирует карточку с распознанными данными в HTML c <tg-emoji>."""
     if intent == "fuel":
         liters = data.get("liters")
         cost = data.get("cost")
@@ -36,12 +52,12 @@ def format_markdown_card(intent: str, data: dict) -> str:
         station_str = str(station) if station else "не указана"
 
         return (
-            "⛽ *Распознана заправка:*\n\n"
-            f"• *Литры:* {liters_str}\n"
-            f"• *Сумма:* {cost_str}\n"
-            f"• *Пробег:* {odo_str}\n"
-            f"• *АЗС:* {station_str}\n\n"
-            "_Все верно? Нажми подтвердить для записи в журнал._"
+            f"{E_DROP} <b>Распознана заправка:</b>\n\n"
+            f"• <b>Литры:</b> <code>{liters_str}</code>\n"
+            f"• <b>Сумма:</b> <code>{cost_str}</code>\n"
+            f"• <b>Пробег:</b> <code>{odo_str}</code>\n"
+            f"• <b>АЗС:</b> <code>{station_str}</code>\n\n"
+            "<i>Все верно? Нажми подтвердить для записи в журнал.</i>"
         )
 
     elif intent == "service":
@@ -54,14 +70,14 @@ def format_markdown_card(intent: str, data: dict) -> str:
         odo_str = f"{odometer:,} км".replace(",", " ") if odometer is not None else "не указан"
 
         text = (
-            "🔧 *Распознано обслуживание / ремонт:*\n\n"
-            f"• *Работы:* {title}\n"
-            f"• *Пробег:* {odo_str}\n"
-            f"• *Стоимость:* {cost_str}\n"
+            f"{E_WRENCH} <b>Распознано обслуживание / ремонт:</b>\n\n"
+            f"• <b>Работы:</b> <b>{html.quote(str(title))}</b>\n"
+            f"• <b>Пробег:</b> <code>{odo_str}</code>\n"
+            f"• <b>Стоимость:</b> <code>{cost_str}</code>\n"
         )
         if notes:
-            text += f"• *Заметки:* {notes}\n"
-        text += "\n_Подтвердить внесение записи в журнал?_"
+            text += f"• <b>Заметки:</b> <i>{html.quote(str(notes))}</i>\n"
+        text += "\n<i>Подтвердить внесение записи в журнал?</i>"
         return text
 
     elif intent == "item_save":
@@ -69,25 +85,25 @@ def format_markdown_card(intent: str, data: dict) -> str:
         location = data.get("location") or "Гараж"
 
         return (
-            "📦 *Запомнить местоположение вещи:*\n\n"
-            f"• *Предмет:* {item_name}\n"
-            f"• *Где лежит:* {location}\n\n"
-            "_Записать в каталог гаража?_"
+            f"{E_BOX} <b>Запомнить местоположение вещи:</b>\n\n"
+            f"• <b>Предмет:</b> <b>{html.quote(str(item_name))}</b>\n"
+            f"• <b>Где лежит:</b> <code>{html.quote(str(location))}</code>\n\n"
+            "<i>Записать в каталог гаража?</i>"
         )
 
     elif intent == "task_save":
         title = data.get("title") or "Задача"
         due_date = data.get("due_date")
-        due_str = f"• *Срок:* {due_date}\n" if due_date else ""
+        due_str = f"• <b>Срок:</b> <code>{html.quote(str(due_date))}</code>\n" if due_date else ""
 
         return (
-            "📝 *Новая задача / список дел:*\n\n"
-            f"• *Дело:* {title}\n"
+            f"{E_NOTE} <b>Новая задача / список дел:</b>\n\n"
+            f"• <b>Дело:</b> <b>{html.quote(str(title))}</b>\n"
             f"{due_str}\n"
-            "_Добавить это в твой список задач?_"
+            "<i>Добавить это в твой список задач?</i>"
         )
 
-    return "ℹ️ *Распознаны данные:*\n" + str(data)
+    return f"ℹ️ <b>Распознаны данные:</b>\n{html.quote(str(data))}"
 
 
 @router.message(F.voice)
@@ -95,7 +111,7 @@ async def handle_voice_entry(message: Message, bot: Bot, state: FSMContext):
     """
     Обработчик голосовых сообщений.
     1. Проверяет права доступа по ALLOWED_TELEGRAM_IDS.
-    2. Отправляет временное сообщение '🎙 Слушаю и расшифровываю...'.
+    2. Отправляет временное сообщение с анимацией/статусом.
     3. Скачивает voice во временную папку temp/.
     4. Транскрибирует через Groq Whisper и парсит интент через Groq LLM.
     5. Выполняет ветвление (item_find, fuel/service/item_save, unknown).
@@ -104,11 +120,11 @@ async def handle_voice_entry(message: Message, bot: Bot, state: FSMContext):
 
     # Проверка доступа к боту
     if settings.ALLOWED_TELEGRAM_IDS and user_id not in settings.ALLOWED_TELEGRAM_IDS:
-        await message.answer("⛔ Доступ ограничен. Ваш ID отсутствует в списке доверенных.")
+        await message.answer(f"{E_LOCK} <b>Доступ ограничен.</b> Ваш ID отсутствует в списке доверенных.")
         return
 
     # Временное сообщение
-    status_msg = await message.answer("🎙 Слушаю и расшифровываю...")
+    status_msg = await message.answer(f"{E_MIC} <i>Слушаю и расшифровываю...</i>")
 
     # Скачивание файла в temp/
     temp_dir = Path("temp")
@@ -126,7 +142,7 @@ async def handle_voice_entry(message: Message, bot: Bot, state: FSMContext):
                 await status_msg.delete()
             except Exception:
                 pass
-            await message.answer("🔇 Не удалось расслышать слова. Попробуй сказать еще раз чуть громче.")
+            await message.answer(f"{E_MUTE} Не удалось расслышать слова. Попробуй сказать еще раз чуть громче.")
             return
 
         # Загрузка недавней истории диалога для понимания контекста
@@ -158,10 +174,10 @@ async def handle_voice_entry(message: Message, bot: Bot, state: FSMContext):
                 results = []
                 for item in found_items:
                     date_str = item.updated_at.strftime("%d.%m.%Y")
-                    results.append(f"🔍 Найдено: {item.item_name} лежит в {item.location} (обновлено {date_str})")
+                    results.append(f"{E_SEARCH} Найдено: <b>{html.quote(item.item_name)}</b> лежит в <code>{html.quote(item.location)}</code> (обновлено {date_str})")
                 await message.answer("\n\n".join(results))
             else:
-                await message.answer("Ничего похожего в гараже не нашел")
+                await message.answer(f"{E_SEARCH} Ничего похожего в гараже не нашел.")
 
         # --- Ветка 2: Список задач ---
         elif intent == "task_list":
@@ -169,14 +185,14 @@ async def handle_voice_entry(message: Message, bot: Bot, state: FSMContext):
                 tasks = await crud.get_active_tasks(session, user_id=user_id)
 
             if tasks:
-                lines = ["📋 *Твой актуальный список дел и задач:*\n"]
+                lines = [f"{E_LIST} <b>Твой актуальный список дел и задач:</b>\n"]
                 for idx, t in enumerate(tasks, 1):
-                    due = f" _(срок: {t.due_date})_" if t.due_date else ""
-                    lines.append(f"{idx}. {t.title}{due}")
+                    due = f" <i>(срок: {html.quote(t.due_date)})</i>" if t.due_date else ""
+                    lines.append(f"{idx}. <b>{html.quote(t.title)}</b>{due}")
                 kb = get_tasks_keyboard(tasks)
-                await message.answer("\n".join(lines), reply_markup=kb, parse_mode="Markdown")
+                await message.answer("\n".join(lines), reply_markup=kb, parse_mode=ParseMode.HTML)
             else:
-                await message.answer("🎉 У тебя нет активных задач! Все дела выполнены или еще не записаны.")
+                await message.answer(f"{E_PARTY} <b>У тебя нет активных задач!</b> Все дела выполнены или еще не записаны.")
 
         # --- Ветка 3: Заправка, сервис, сохранение вещи, задача ---
         elif intent in ["fuel", "service", "item_save", "task_save"]:
@@ -197,7 +213,7 @@ async def handle_voice_entry(message: Message, bot: Bot, state: FSMContext):
             await message.answer(
                 card_text,
                 reply_markup=get_entry_confirm_keyboard(draft_id=draft_id),
-                parse_mode="Markdown"
+                parse_mode=ParseMode.HTML
             )
 
         # --- Ветка 4: Ответ ассистента (вопросы, советы, поиск в интернете) ---
@@ -206,7 +222,7 @@ async def handle_voice_entry(message: Message, bot: Bot, state: FSMContext):
             search_query = data.get("search_query")
             user_query = data.get("user_query") or transcript
 
-            wait_text = "🔍 <i>Ищу информацию в интернете...</i>" if needs_web else "🤔 <i>Думаю над ответом...</i>"
+            wait_text = f"{E_SEARCH} <i>Ищу информацию в интернете...</i>" if needs_web else f"{E_THINK} <i>Думаю над ответом...</i>"
             assistant_wait_msg = await message.answer(wait_text)
             try:
                 answer = await answer_query(
@@ -232,12 +248,12 @@ async def handle_voice_entry(message: Message, bot: Bot, state: FSMContext):
                     await assistant_wait_msg.delete()
                 except Exception:
                     pass
-                await message.answer("⚠️ Не удалось получить ответ ассистента. Попробуй переформулировать вопрос.")
+                await message.answer(f"{E_ALERT} Не удалось получить ответ ассистента. Попробуй переформулировать вопрос.")
 
         # --- Ветка 5: Не удалось распознать (шум) ---
         else:
             if transcript and len(transcript.strip()) > 3:
-                assistant_wait_msg = await message.answer("🤔 <i>Секунду...</i>")
+                assistant_wait_msg = await message.answer(f"{E_THINK} <i>Секунду...</i>")
                 try:
                     answer = await answer_query(user_query=transcript, needs_web=False, history=history)
                     try:
@@ -256,10 +272,10 @@ async def handle_voice_entry(message: Message, bot: Bot, state: FSMContext):
                     except Exception:
                         pass
                     await message.answer(
-                        f"Не удалось разобрать голосовое: «{transcript}». Попробуй сказать еще раз."
+                        f"{E_QUESTION} Не удалось разобрать голосовое: «{html.quote(transcript)}». Попробуй сказать еще раз."
                     )
             else:
-                await message.answer("🔇 Не удалось расслышать слова. Попробуй сказать еще раз.")
+                await message.answer(f"{E_MUTE} Не удалось расслышать слова. Попробуй сказать еще раз.")
 
     except Exception as e:
         logger.error(f"Ошибка при обработке голосового сообщения: {e}", exc_info=True)
@@ -268,5 +284,6 @@ async def handle_voice_entry(message: Message, bot: Bot, state: FSMContext):
         except Exception:
             pass
         await message.answer(
-            "⚠️ Произошла ошибка при обработке голосового сообщения. Пожалуйста, попробуй еще раз."
+            f"{E_ALERT} Произошла ошибка при обработке голосового сообщения. Пожалуйста, попробуй еще раз."
         )
+
