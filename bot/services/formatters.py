@@ -284,6 +284,7 @@ def postprocess_unicode_math(text: str) -> str:
     text = re.sub(r'([a-zA-Z0-9∫∑∏\(\)])_([0-9a-zA-Z+=]+)', lambda m: m.group(1) + to_sub(m.group(2)), text)
     # 5. Пределы интегралов
     text = text.replace('∫_0', '∫₀').replace('∫_a', '∫ₐ')
+    text = re.sub(r'(\^∞)([a-zA-Z0-9(])', r'\1 \2', text)
     # 6. Умножение
     text = text.replace(' * ', ' · ')
     # 7. Лишние пробелы
@@ -496,23 +497,25 @@ def md_to_telegram_html(text: str) -> str:
 
     text = re.sub(r'`[^`\n]+`', save_inline_code, text)
 
-    # 4. Блочные формулы: $$ ... $$ и \[ ... \] -> преобразуем в блоки цитат Telegram
+    # 4. Блочные формулы: <tg-math-block>, $$ ... $$ и \[ ... \] -> преобразуем в блоки цитат Telegram
     def save_display_math(m):
         raw_inner = m.group(1).strip()
         converted = convert_latex_math(raw_inner)
         math_blocks.append(converted)
         return f"\nXXMATHBLOCK{len(math_blocks)-1}XX\n"
 
+    text = re.sub(r'<tg-math-block>([\s\S]*?)</tg-math-block>', save_display_math, text, flags=re.IGNORECASE)
     text = re.sub(r'\$\$([\s\S]*?)\$\$', save_display_math, text)
     text = re.sub(r'\\\[([\s\S]*?)\\\]', save_display_math, text)
 
-    # 5. Инлайн формулы: $ ... $ и \( ... \) -> преобразуем в жирный Unicode
+    # 5. Инлайн формулы: <tg-math>, $ ... $ и \( ... \) -> преобразуем в жирный Unicode
     def save_inline_math(m):
         raw_inner = m.group(1).strip()
         converted = convert_latex_math(raw_inner)
         math_inlines.append(converted)
         return f"XXMATHINLINE{len(math_inlines)-1}XX"
 
+    text = re.sub(r'<tg-math>([\s\S]*?)</tg-math>', save_inline_math, text, flags=re.IGNORECASE)
     text = re.sub(r'(?<!\$)\$(?!\$)([^$\n]+)(?<!\$)\$(?!\$)', save_inline_math, text)
     text = re.sub(r'\\\((.+?)\\\)', save_inline_math, text)
 
