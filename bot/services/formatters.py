@@ -459,7 +459,10 @@ def convert_markdown_tables(text: str) -> str:
                                 else:
                                     other_parts.append(val)
 
-                        lead = f"{num}**{title}**"
+                        if title.startswith(('XXMATH', '<tg-math', '$', '\\')):
+                            lead = f"{num}{title}"
+                        else:
+                            lead = f"{num}**{title}**"
                         if meta_val:
                             lead += f" ({meta_val})"
 
@@ -533,6 +536,35 @@ def md_to_telegram_html(text: str) -> str:
 
     text = re.sub(r'`[^`\n]+`', save_inline_code, text)
 
+    # 3.1 Нормализуем неполный Unicode интеграл с LaTeX слешем (∫\ln -> \int \ln)
+    text = re.sub(r'∫\s*\\', r'\\int \\', text)
+
+    # 3.2 Формулы в двойных звездочках (**\frac{...}{...}** или **\int ...**) переводим в <tg-math>
+    def clean_bold_math(m):
+        inner = m.group(1).strip()
+        if inner.startswith(('<tg-math', '<tg-math-block')):
+            return inner
+        if '\\' in inner and any(k in inner for k in ['frac', 'int', 'sum', 'prod', 'sqrt', 'sin', 'cos', 'dx', 'zeta', 'lim']):
+            return f"<tg-math>{inner}</tg-math>"
+        return m.group(0)
+
+    text = re.sub(r'\*\*\s*([^\n*]+?)\s*\*\*', clean_bold_math, text)
+
+    # 3.3 Если пункт списка начинается с формулы LaTeX без тега:
+    # • \frac{...}{...} (пояснение) -> • <tg-math>\frac{...}{...}</tg-math> (пояснение)
+    def clean_bullet_math(m):
+        bullet = m.group(1)
+        formula = m.group(2).strip()
+        rest = m.group(3)
+        return f"{bullet}<tg-math>{formula}</tg-math>{rest}"
+
+    text = re.sub(
+        r'(^[ \t]*[•\-\*]\s*)(\\(?:frac|int|iint|iiint|sum|prod|sqrt|boxed|zeta)\b(?:[^{}\s\n]*\{[^}]*\})*[\w\^_\(\)\+\-\*\/\s\\\,]*?)(\s*(?:—|–|\:\s|\([а-яА-ЯёЁ]|[а-яА-ЯёЁ])[^\n]*)',
+        clean_bullet_math,
+        text,
+        flags=re.MULTILINE
+    )
+
     # 4. Блочные формулы: <tg-math-block>, $$ ... $$ и \[ ... \] -> сохраняем как нативные <tg-math-block>
     def save_display_math(m):
         raw_inner = m.group(1).strip()
@@ -553,22 +585,24 @@ def md_to_telegram_html(text: str) -> str:
     text = re.sub(r'(?<!\$)\$(?!\$)([^$\n]+)(?<!\$)\$(?!\$)', save_inline_math, text)
     text = re.sub(r'\\\((.+?)\\\)', save_inline_math, text)
 
-    # 5.1 Обрабатываем строки с явными формулами LaTeX (\int, \frac, \sum, \sqrt, \zeta, \boxed), если они не были обернуты в $$ или $
-    STANDALONE_MATH_RE = re.compile(
-        r'^[ \t]*(?:[a-zA-Z0-9_\(\)]+\s*=\s*)?\\(?:frac|int|iint|iiint|sum|prod|sqrt|boxed|zeta)(?![a-zA-Z])'
-    )
-
+    # 5.1 Обрабатываем строки с явными формулами LaTeX (\int, \frac, \sum, \sqrt, \zeta, \boxed),
+    # ТОЛЬКО если вся строка состоит чисто из формулы (без кириллицы и без маркеров списка)
     def save_unwrapped_math_line(m):
         raw_line = m.group(0).strip()
+        if re.search(r'[а-яА-ЯёЁ]', raw_line) or re.match(r'^[•\-\*]\s+', raw_line):
+            return m.group(0)
         math_blocks.append(raw_line)
         return f"\nXXMATHBLOCK{len(math_blocks)-1}XX\n"
 
     text = re.sub(
-        r'^[ \t]*([^\n]*?\\(?:frac|int|iint|iiint|sum|prod|sqrt|boxed|zeta|alpha|beta|gamma|delta|pi|infty)(?![a-zA-Z])[^\n]*)$',
+        r'^[ \t]*([a-zA-Z0-9_\(\)]+\s*=\s*)?\\(?:frac|int|iint|iiint|sum|prod|sqrt|boxed|zeta)[^\n]*$',
         save_unwrapped_math_line,
         text,
         flags=re.MULTILINE
     )
+
+    # 5.2 Снимаем звездочки жирного шрифта вокруг математических блоков, если они остались
+    text = re.sub(r'\*\*\s*(XXMATH(?:INLINE|BLOCK)\d+XX)\s*\*\*', r'\1', text)
 
     # 6. Сохраняем УЖЕ существующие валидные Telegram HTML теги (<b>, </b>, <i>, </i>, <code>, </code>, <blockquote>, </blockquote>, <a>, </a>)
     valid_tags = []

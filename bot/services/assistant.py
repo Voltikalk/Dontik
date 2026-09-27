@@ -1,15 +1,16 @@
 import time
 import re
+import asyncio
 import logging
 from typing import Optional, List, Dict, AsyncGenerator
 from openai import AsyncOpenAI
-from aiogram.types import Message, LinkPreviewOptions
+from aiogram.types import Message, LinkPreviewOptions, InputRichMessage
 from aiogram.enums import ParseMode
 
 from bot.config import settings
 from bot.services.web_search import search_web
 from bot.emojis import E_SEARCH, E_THINK, E_ALERT
-from bot.services.formatters import md_to_telegram_html, send_formatted_message
+from bot.services.formatters import md_to_telegram_html, send_formatted_message, convert_rich_tags_to_unicode
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +45,10 @@ ASSISTANT_SYSTEM_PROMPT = """Ты — универсальный персона�
 
 5. ПРАВИЛА ВЫВОДА МАТЕМАТИКИ (Rich Messages с нативным KaTeX рендерингом):
    - Telegram Bot API 10.1+ нативно рендерит математику через KaTeX!
-   - Inline-формулы (внутри строк) ВСЕГДА оборачивай в <tg-math>...</tg-math>.
+   - Inline-формулы (внутри строк и списков) ВСЕГДА оборачивай в <tg-math>...</tg-math>.
+     Пример: • <tg-math>\\int \\frac{\\sin x}{x} dx</tg-math> (специальная функция) — интегральный синус
+     Пример: • <tg-math>\\int \\frac{dx}{(x+1)^2}</tg-math> (замена переменной) — подставьте u = x+1
      Пример: где <tg-math>G \\approx 0.9159</tg-math> — каталогово число.
-     Пример: Работает при <tg-math>\\text{Re}(s) > 1</tg-math>.
    - Выключные формулы (на отдельной строке) ВСЕГДА оборачивай в <tg-math-block>...</tg-math-block>.
      Пример:
      <tg-math-block>\\int_0^1 x^{-x} dx = \\sum_{n=1}^\\infty \\frac{1}{n^n} \\approx 1.2913</tg-math-block>
@@ -56,6 +58,8 @@ ASSISTANT_SYSTEM_PROMPT = """Ты — универсальный персона�
    - Используй стандартные LaTeX-команды: \\int, \\sum, \\frac, \\pi, \\infty, \\zeta, \\sqrt, \\sin, \\cos, \\ln, \\Gamma, \\approx.
    - Дроби в степенях всегда заключай в фигурные скобки: x^{s-1}, e^{-x^2}, e^{-b^2}, x^{3/2}.
    - КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО заменять LaTeX на псевдо-символы Unicode (∫, ∑, ², ³) внутри формул — пиши чистый LaTeX (\\int, \\sum, ^2, ^3).
+   - КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО оборачивать теги <tg-math> или <tg-math-block> в звездочки жирного шрифта (**<tg-math>...</tg-math>**)! Звездочки внутри KaTeX ломают формулу.
+   - КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО помещать русский текст, пояснения или скобки внутрь <tg-math> или <tg-math-block>! Внутри тегов должен быть ТОЛЬКО чистый математический LaTeX. Все русские слова, скобки и пояснения пиши СТРОГО снаружи формулы обычным текстом.
    - Вне математики используй обычный текст или HTML-теги: <b>, <i>, <code>, <blockquote>.
    - Не оборачивай формулы в <code> или <pre> — для математики есть специальные теги <tg-math> и <tg-math-block>.
    - ИТОГОВЫЙ ответ или главную формулу при пошаговом решении выделяй через \\boxed{...}:
@@ -120,7 +124,10 @@ async def answer_query(
     messages.append({"role": "user", "content": prompt_content})
 
     client = get_groq_client()
-    candidate_models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
+    candidate_models = [settings.GROQ_MODEL]
+    for m in ["openai/gpt-oss-120b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]:
+        if m not in candidate_models:
+            candidate_models.append(m)
 
     for model_name in candidate_models:
         try:
@@ -188,7 +195,10 @@ async def stream_query_answer(
     messages.append({"role": "user", "content": prompt_content})
 
     client = get_groq_client()
-    candidate_models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
+    candidate_models = [settings.GROQ_MODEL]
+    for m in ["openai/gpt-oss-120b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]:
+        if m not in candidate_models:
+            candidate_models.append(m)
 
     for model_name in candidate_models:
         try:
@@ -222,6 +232,18 @@ async def stream_query_answer(
     yield fallback_full
 
 
+def clean_for_preview(text: str) -> str:
+    """Очищает промежуточный текст для аккуратного отображения курсора при живом наборе."""
+    s = text
+    s = re.sub(r'</?(?:tg-math|tg-math-block)[^>]*?>?', '', s)
+    s = re.sub(r'</?(?:b|i|u|s|code|pre|blockquote|a|tg-emoji)[^>]*?>?', '', s)
+    s = s.replace(r'\int', '∫').replace(r'\sum', '∑').replace(r'\infty', '∞')
+    s = re.sub(r'\\(?:sin|cos|tan|ln|log|exp|sqrt|pi)\b', lambda m: m.group(0)[1:], s)
+    s = re.sub(r'\\frac\{([^}]+)\}\{([^}]+)\}', r'\1/\2', s)
+    s = re.sub(r'[{}]', '', s)
+    return s.strip()
+
+
 async def stream_assistant_response(
     message: Message,
     user_query: str,
@@ -232,10 +254,10 @@ async def stream_assistant_response(
 ) -> str:
     """
     Осуществляет плавный потоковый вывод ответа ассистента в Telegram в реальном времени.
-    - Обновляет сообщение каждые 0.5-0.7 секунды с эффектом живого набора текста (курсор ▌).
-    - Защищен от превышения лимитов Telegram (Flood control) и синтаксических ошибок неполных HTML тегов.
-    - По завершении генерации отправляет законченное сообщение: с нативным KaTeX рендерингом для формул
-      (через Rich Messages API) или обновляет текущее сообщение.
+    - Обновляет сообщение каждые 0.35-0.5 секунды с эффектом живого набора текста (курсор ▌).
+    - При быстром получении ответа обеспечивает визуальную плавность появления.
+    - Редактирует сообщение НА МЕСТЕ без удалений и мигания: нативный KaTeX рендеринг через
+      Rich Messages API (edit_message_text с rich_message) или красивый HTML.
     - Возвращает полный итоговый текст ответа для сохранения в историю диалога.
     """
     if status_msg is None:
@@ -247,8 +269,9 @@ async def stream_assistant_response(
         status_msg = await message.answer(wait_text)
 
     full_text = ""
-    last_edit_time = time.time()
-    last_edited_text = ""
+    last_edit_time = 0.0
+    last_edited_len = 0
+    edit_count = 0
 
     async for delta in stream_query_answer(
         user_query=user_query,
@@ -258,18 +281,23 @@ async def stream_assistant_response(
     ):
         full_text += delta
         now = time.time()
-        # Троттлинг обновлений: не чаще 1 раза в 0.6 сек и если накопилось >= 12 новых символов
-        if (now - last_edit_time >= 0.6) and (len(full_text) - len(last_edited_text) >= 12):
-            preview = re.sub(r'</?(?:tg-math|tg-math-block|b|i|u|s|code|pre|blockquote)[^>]*?>?', '', full_text).strip()
+        # Первый апдейт делаем как только накопилось >= 15 символов!
+        # Последующие — каждые 0.35 сек, если добавилось >= 20 символов
+        min_interval = 0.35
+        min_chars = 15 if last_edited_len == 0 else 20
+
+        if (now - last_edit_time >= min_interval) and (len(full_text) - last_edited_len >= min_chars):
+            preview = clean_for_preview(full_text)
             if preview:
                 try:
                     await status_msg.edit_text((preview + " ▌")[:4000], parse_mode=None)
                     last_edit_time = now
-                    last_edited_text = full_text
+                    last_edited_len = len(full_text)
+                    edit_count += 1
                 except Exception:
                     pass
 
-    # Финализация: когда ответ полностью получен
+    # Резерв, если ничего не вернулось
     if not full_text.strip():
         full_text = await answer_query(
             user_query=user_query,
@@ -278,19 +306,64 @@ async def stream_assistant_response(
             history=history
         )
 
+    # Если генерация завершилась слишком быстро (меньше 2 правок),
+    # показываем 1-2 промежуточных шага для красивого эффекта печати
+    if edit_count < 2 and len(full_text) > 80:
+        preview_full = clean_for_preview(full_text)
+        total_len = len(preview_full)
+        if total_len > 60:
+            step1_end = int(total_len * 0.45)
+            step1_text = preview_full[:step1_end].rsplit(' ', 1)[0]
+            try:
+                await status_msg.edit_text((step1_text + " ▌")[:4000], parse_mode=None)
+                await asyncio.sleep(0.25)
+            except Exception:
+                pass
+
+            step2_end = int(total_len * 0.8)
+            step2_text = preview_full[:step2_end].rsplit(' ', 1)[0]
+            try:
+                await status_msg.edit_text((step2_text + " ▌")[:4000], parse_mode=None)
+                await asyncio.sleep(0.25)
+            except Exception:
+                pass
+
     final_html = md_to_telegram_html(full_text)
     has_rich_math = bool(re.search(r'</?(?:tg-math|tg-math-block)\b', final_html, re.IGNORECASE))
     is_long = len(full_text) > 3800
 
-    if has_rich_math or is_long:
-        # Для формул KaTeX (Rich Messages) или длинных разбитых сообщений
+    if is_long:
+        # Для слишком длинных сообщений (>3800 символов) удаляем статус и отправляем частями
         try:
             await status_msg.delete()
         except Exception:
             pass
         await send_formatted_message(message, full_text)
+    elif has_rich_math:
+        # Редактируем сообщение НА МЕСТЕ в нативный Rich Message с KaTeX
+        try:
+            await status_msg.edit_text(
+                "...",
+                rich_message=InputRichMessage(html=final_html),
+                link_preview_options=LinkPreviewOptions(is_disabled=True)
+            )
+        except Exception as e:
+            logger.warning(f"Ошибка edit_text с rich_message: {e}. Переключаемся на Unicode fallback...")
+            fallback_html = convert_rich_tags_to_unicode(final_html)
+            try:
+                await status_msg.edit_text(
+                    fallback_html,
+                    parse_mode=ParseMode.HTML,
+                    link_preview_options=LinkPreviewOptions(is_disabled=True)
+                )
+            except Exception:
+                try:
+                    await status_msg.delete()
+                except Exception:
+                    pass
+                await send_formatted_message(message, full_text)
     else:
-        # Для обычных сообщений обновляем текущий пузырь без лишних удалений
+        # Стандартный текст без формул — обновляем текущий пузырь
         try:
             await status_msg.edit_text(
                 final_html,
