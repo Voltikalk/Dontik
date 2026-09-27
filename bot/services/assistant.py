@@ -125,7 +125,7 @@ async def answer_query(
 
     client = get_groq_client()
     candidate_models = [settings.GROQ_MODEL]
-    for m in ["openai/gpt-oss-120b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]:
+    for m in ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]:
         if m not in candidate_models:
             candidate_models.append(m)
 
@@ -196,7 +196,7 @@ async def stream_query_answer(
 
     client = get_groq_client()
     candidate_models = [settings.GROQ_MODEL]
-    for m in ["openai/gpt-oss-120b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]:
+    for m in ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]:
         if m not in candidate_models:
             candidate_models.append(m)
 
