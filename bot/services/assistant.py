@@ -1,9 +1,15 @@
+import time
+import re
 import logging
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, AsyncGenerator
 from openai import AsyncOpenAI
+from aiogram.types import Message, LinkPreviewOptions
+from aiogram.enums import ParseMode
 
 from bot.config import settings
 from bot.services.web_search import search_web
+from bot.emojis import E_SEARCH, E_THINK, E_ALERT
+from bot.services.formatters import md_to_telegram_html, send_formatted_message
 
 logger = logging.getLogger(__name__)
 
@@ -36,19 +42,24 @@ ASSISTANT_SYSTEM_PROMPT = """Ты — универсальный персона�
    - ЗАПРЕЩЕНО вставлять длинные голые URL в текст сообщений. Если уместно дать источники (для интерактивных схем или проверки данных), укажи их в самом конце одной компактной строкой через Markdown-ссылки:
      🔗 **Источники:** [Википедия](URL) • [Название](URL)
 
-5. ПРАВИЛА ВЫВОДА МАТЕМАТИКИ (Rich Messages):
-   - Inline-формулы оборачивай в <tg-math>...</tg-math>.
-   - Блочные (выключные) формулы оборачивай в <tg-math-block>...</tg-math-block>.
-   - Внутри этих тегов пиши чистый LaTeX без делимитров $...$, $$...$, \\(...\\), \\[...\\].
-   - Используй стандартные LaTeX-команды: \\int, \\sum, \\frac, \\pi, \\infty, \\zeta, \\left, \\right, \\sqrt, \\boxed.
-   - Не используй Unicode-заменители (∫, ∑, π, ∞, ², ³, ₀) внутри математических тегов — вместо них пиши чистый LaTeX (\\int, \\sum, \\pi, \\infty, ^2, ^3, _0).
-   - Вне математики используй обычный текст или HTML-теги Telegram: <b>, <i>, <u>, <code>.
-   - Не оборачивай формулы в <code> или <pre> — для математики используй <tg-math> и <tg-math-block>.
-   - Если формула сложная, разбивай решение на шаги: каждый шаг — отдельный <tg-math-block>.
-   Пример:
-   Дано: <tg-math-block>I = \\int_0^\\infty \\frac{x^3}{e^x - 1}\\,dx</tg-math-block>
-   Решение: ...
-   Ответ: <tg-math-block>\\boxed{I = \\frac{\\pi^4}{15}}</tg-math-block>
+5. ПРАВИЛА ВЫВОДА МАТЕМАТИКИ (Rich Messages с нативным KaTeX рендерингом):
+   - Telegram Bot API 10.1+ нативно рендерит математику через KaTeX!
+   - Inline-формулы (внутри строк) ВСЕГДА оборачивай в <tg-math>...</tg-math>.
+     Пример: где <tg-math>G \\approx 0.9159</tg-math> — каталогово число.
+     Пример: Работает при <tg-math>\\text{Re}(s) > 1</tg-math>.
+   - Выключные формулы (на отдельной строке) ВСЕГДА оборачивай в <tg-math-block>...</tg-math-block>.
+     Пример:
+     <tg-math-block>\\int_0^1 x^{-x} dx = \\sum_{n=1}^\\infty \\frac{1}{n^n} \\approx 1.2913</tg-math-block>
+     Пример:
+     <tg-math-block>\\int_0^{\\pi/4} \\ln(\\tan x) dx = -G</tg-math-block>
+   - Внутри тегов пиши чистый LaTeX без делимитров $...$, $$...$, \\(...\\), \\[...\\].
+   - Используй стандартные LaTeX-команды: \\int, \\sum, \\frac, \\pi, \\infty, \\zeta, \\sqrt, \\sin, \\cos, \\ln, \\Gamma, \\approx.
+   - Дроби в степенях всегда заключай в фигурные скобки: x^{s-1}, e^{-x^2}, e^{-b^2}, x^{3/2}.
+   - КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО заменять LaTeX на псевдо-символы Unicode (∫, ∑, ², ³) внутри формул — пиши чистый LaTeX (\\int, \\sum, ^2, ^3).
+   - Вне математики используй обычный текст или HTML-теги: <b>, <i>, <code>, <blockquote>.
+   - Не оборачивай формулы в <code> или <pre> — для математики есть специальные теги <tg-math> и <tg-math-block>.
+   - ИТОГОВЫЙ ответ или главную формулу при пошаговом решении выделяй через \\boxed{...}:
+     <tg-math-block>\\boxed{I = \\frac{\\pi^4}{15}}</tg-math-block>
 """
 
 
@@ -73,8 +84,6 @@ async def answer_query(
     При необходимости выполняет веб-поиск через DuckDuckGo и передает результаты в LLM.
     """
     web_context = ""
-    search_sources = []
-
     if needs_web:
         effective_query = search_query.strip() if search_query else user_query.strip()
         logger.info(f"Выполняется адаптивный веб-поиск для ассистента: «{effective_query}»")
@@ -84,15 +93,12 @@ async def answer_query(
             snippets = []
             for idx, r in enumerate(search_results, 1):
                 snippets.append(f"[{idx}] {r['title']}\n{r['body']}\nИсточник: {r['href']}")
-                if r.get("href"):
-                    search_sources.append(r["href"])
             web_context = (
                 "\n\n--- АКТУАЛЬНЫЕ ДАННЫЕ ИЗ СЕТИ ИНТЕРНЕТ (DuckDuckGo) ---\n"
                 + "\n\n".join(snippets)
                 + "\n--------------------------------------------------------\n"
             )
 
-    # Текущий запрос пользователя
     prompt_content = f"Вопрос пользователя: {user_query}"
     if web_context:
         prompt_content += (
@@ -103,7 +109,6 @@ async def answer_query(
             "3. Если полезно указать источники, добавь в самый конец одну строку: '🔗 **Источники:** [Название](URL) • [Название](URL)'."
         )
 
-    # Формирование сообщений с историей диалога
     messages = [{"role": "system", "content": ASSISTANT_SYSTEM_PROMPT}]
     if history:
         for item in history:
@@ -130,32 +135,173 @@ async def answer_query(
             if content.strip():
                 return content.strip()
         except Exception as e:
-            err_str = str(e)
             logger.warning(f"Модель {model_name} вернула ошибку при ответе ассистента: {e}")
-
-            # Если превышен лимит входных токенов (413 / Request too large / ITPM)
-            if any(term in err_str.lower() for term in ["413", "too large", "limit 7000", "itpm"]):
-                logger.info("Аварийное сжатие контекста запроса для обхода лимита токенов Groq...")
-                short_prompt = prompt_content
-                if len(short_prompt) > 3000:
-                    short_prompt = short_prompt[:3000] + "\n\n... [данные сокращены по лимиту нейросети]"
-                compressed_messages = [
-                    {"role": "system", "content": ASSISTANT_SYSTEM_PROMPT},
-                    {"role": "user", "content": short_prompt}
-                ]
-                try:
-                    retry_resp = await client.chat.completions.create(
-                        model=model_name,
-                        messages=compressed_messages,
-                        temperature=0.3,
-                        max_tokens=700
-                    )
-                    retry_content = retry_resp.choices[0].message.content or ""
-                    if retry_content.strip():
-                        return retry_content.strip()
-                except Exception as retry_e:
-                    logger.warning(f"Повторный сжатый запрос для {model_name} также не удался: {retry_e}")
-
             continue
 
     return "Прости, не удалось получить ответ от нейросети прямо сейчас. Попробуй задать вопрос чуть позже."
+
+
+async def stream_query_answer(
+    user_query: str,
+    needs_web: bool = False,
+    search_query: Optional[str] = None,
+    history: Optional[List[Dict[str, str]]] = None
+) -> AsyncGenerator[str, None]:
+    """
+    Генерирует потоковый ответ ассистента по токенам (stream=True).
+    Поддерживает контекст предыдущих реплик диалога и результаты веб-поиска.
+    """
+    web_context = ""
+    if needs_web:
+        effective_query = search_query.strip() if search_query else user_query.strip()
+        logger.info(f"Выполняется адаптивный веб-поиск для ассистента: «{effective_query}»")
+        search_results = await search_web(effective_query, max_results=4)
+
+        if search_results:
+            snippets = []
+            for idx, r in enumerate(search_results, 1):
+                snippets.append(f"[{idx}] {r['title']}\n{r['body']}\nИсточник: {r['href']}")
+            web_context = (
+                "\n\n--- АКТУАЛЬНЫЕ ДАННЫЕ ИЗ СЕТИ ИНТЕРНЕТ (DuckDuckGo) ---\n"
+                + "\n\n".join(snippets)
+                + "\n--------------------------------------------------------\n"
+            )
+
+    prompt_content = f"Вопрос пользователя: {user_query}"
+    if web_context:
+        prompt_content += (
+            f"\n\n{web_context}\n"
+            "СТРОГАЯ ИНСТРУКЦИЯ ПО ИСПОЛЬЗОВАНИЮ РЕЗУЛЬТАТОВ ПОИСКА:\n"
+            "1. Не пересказывай поисковую выдачу списком сайтов! Сформируй единый, структурированный, готовый ответ на вопрос пользователя.\n"
+            "2. Никаких таблиц с разделителями (|...|)! Оформляй списки компактно и наглядно.\n"
+            "3. Если полезно указать источники, добавь в самый конец одну строку: '🔗 **Источники:** [Название](URL) • [Название](URL)'."
+        )
+
+    messages = [{"role": "system", "content": ASSISTANT_SYSTEM_PROMPT}]
+    if history:
+        for item in history:
+            role = item.get("role")
+            content = item.get("content", "").strip()
+            if role in ["user", "assistant"] and content:
+                messages.append({"role": role, "content": content})
+
+    messages.append({"role": "user", "content": prompt_content})
+
+    client = get_groq_client()
+    candidate_models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
+
+    for model_name in candidate_models:
+        try:
+            req_tokens = 750 if "qwen" in model_name else 1400
+            stream_resp = await client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=0.3,
+                max_tokens=req_tokens,
+                stream=True
+            )
+            has_yielded = False
+            async for chunk in stream_resp:
+                if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                    delta = chunk.choices[0].delta.content
+                    has_yielded = True
+                    yield delta
+            if has_yielded:
+                return
+        except Exception as e:
+            logger.warning(f"Ошибка потоковой генерации {model_name}: {e}")
+            continue
+
+    # Резервный вызов, если стриминг не удался
+    fallback_full = await answer_query(
+        user_query=user_query,
+        needs_web=needs_web,
+        search_query=search_query,
+        history=history
+    )
+    yield fallback_full
+
+
+async def stream_assistant_response(
+    message: Message,
+    user_query: str,
+    needs_web: bool = False,
+    search_query: Optional[str] = None,
+    history: Optional[List[Dict[str, str]]] = None,
+    status_msg: Optional[Message] = None
+) -> str:
+    """
+    Осуществляет плавный потоковый вывод ответа ассистента в Telegram в реальном времени.
+    - Обновляет сообщение каждые 0.5-0.7 секунды с эффектом живого набора текста (курсор ▌).
+    - Защищен от превышения лимитов Telegram (Flood control) и синтаксических ошибок неполных HTML тегов.
+    - По завершении генерации отправляет законченное сообщение: с нативным KaTeX рендерингом для формул
+      (через Rich Messages API) или обновляет текущее сообщение.
+    - Возвращает полный итоговый текст ответа для сохранения в историю диалога.
+    """
+    if status_msg is None:
+        wait_text = (
+            f"{E_SEARCH} <i>Ищу актуальную информацию в интернете...</i>"
+            if needs_web
+            else f"{E_THINK} <i>Думаю над ответом...</i>"
+        )
+        status_msg = await message.answer(wait_text)
+
+    full_text = ""
+    last_edit_time = time.time()
+    last_edited_text = ""
+
+    async for delta in stream_query_answer(
+        user_query=user_query,
+        needs_web=needs_web,
+        search_query=search_query,
+        history=history
+    ):
+        full_text += delta
+        now = time.time()
+        # Троттлинг обновлений: не чаще 1 раза в 0.6 сек и если накопилось >= 12 новых символов
+        if (now - last_edit_time >= 0.6) and (len(full_text) - len(last_edited_text) >= 12):
+            preview = re.sub(r'</?(?:tg-math|tg-math-block|b|i|u|s|code|pre|blockquote)[^>]*?>?', '', full_text).strip()
+            if preview:
+                try:
+                    await status_msg.edit_text((preview + " ▌")[:4000], parse_mode=None)
+                    last_edit_time = now
+                    last_edited_text = full_text
+                except Exception:
+                    pass
+
+    # Финализация: когда ответ полностью получен
+    if not full_text.strip():
+        full_text = await answer_query(
+            user_query=user_query,
+            needs_web=needs_web,
+            search_query=search_query,
+            history=history
+        )
+
+    final_html = md_to_telegram_html(full_text)
+    has_rich_math = bool(re.search(r'</?(?:tg-math|tg-math-block)\b', final_html, re.IGNORECASE))
+    is_long = len(full_text) > 3800
+
+    if has_rich_math or is_long:
+        # Для формул KaTeX (Rich Messages) или длинных разбитых сообщений
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+        await send_formatted_message(message, full_text)
+    else:
+        # Для обычных сообщений обновляем текущий пузырь без лишних удалений
+        try:
+            await status_msg.edit_text(
+                final_html,
+                parse_mode=ParseMode.HTML,
+                link_preview_options=LinkPreviewOptions(is_disabled=True)
+            )
+        except Exception:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+            await send_formatted_message(message, full_text)
+
+    return full_text

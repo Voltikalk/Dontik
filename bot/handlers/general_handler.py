@@ -9,7 +9,7 @@ from bot.database.db import get_session
 from bot.database import crud
 from bot.keyboards.inline import get_tasks_keyboard, get_entry_confirm_keyboard, get_main_menu_keyboard
 from bot.services.intent_parser import parse_user_intent
-from bot.services.assistant import answer_query
+from bot.services.assistant import answer_query, stream_assistant_response
 from bot.services.draft_store import save_draft
 from bot.handlers.voice_handler import format_markdown_card
 from bot.handlers.states import GarageEntryState
@@ -399,17 +399,14 @@ async def handle_text_message(message: Message, state: FSMContext):
         status_text = f"{E_SEARCH} <i>Ищу актуальную информацию в интернете...</i>" if needs_web else f"{E_THINK} <i>Думаю над ответом...</i>"
         status_msg = await message.answer(status_text)
         try:
-            answer = await answer_query(
+            answer = await stream_assistant_response(
+                message=message,
                 user_query=user_query,
                 needs_web=needs_web,
                 search_query=search_query,
-                history=history
+                history=history,
+                status_msg=status_msg
             )
-            try:
-                await status_msg.delete()
-            except Exception:
-                pass
-            await send_formatted_message(message, answer)
 
             # Сохраняем диалог в память
             async with get_session() as session:
@@ -428,12 +425,13 @@ async def handle_text_message(message: Message, state: FSMContext):
     else:
         status_msg = await message.answer(f"{E_THINK} <i>Секунду...</i>")
         try:
-            answer = await answer_query(user_query=raw_text, needs_web=False, history=history)
-            try:
-                await status_msg.delete()
-            except Exception:
-                pass
-            await send_formatted_message(message, answer)
+            answer = await stream_assistant_response(
+                message=message,
+                user_query=raw_text,
+                needs_web=False,
+                history=history,
+                status_msg=status_msg
+            )
 
             # Сохраняем диалог в память
             async with get_session() as session:

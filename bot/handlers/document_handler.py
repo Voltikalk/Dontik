@@ -11,7 +11,7 @@ from bot.database.db import get_session
 from bot.database import crud
 from bot.services.file_parser import extract_text_from_file, parse_pdf_smart
 from bot.services.vision import analyze_image
-from bot.services.assistant import answer_query
+from bot.services.assistant import answer_query, stream_assistant_response
 from bot.services.formatters import send_formatted_message
 from bot.emojis import (
     E_DOC,
@@ -132,14 +132,13 @@ async def handle_document_message(message: Message, bot: Bot):
                 f"выдели ключевые пункты, данные таблиц, выводы или важные показатели:\n\n{extracted_text}"
             )
 
-        answer = await answer_query(user_query=query, needs_web=False, history=history)
-
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-
-        await send_formatted_message(message, answer)
+        answer = await stream_assistant_response(
+            message=message,
+            user_query=query,
+            needs_web=False,
+            history=history,
+            status_msg=status_msg
+        )
 
         user_log = f"Отправил документ «{filename}». " + (f"Запрос: «{caption}»" if caption else "Просьба разобрать содержимое.")
         async with get_session() as session:

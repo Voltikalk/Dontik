@@ -15,7 +15,7 @@ from bot.services.intent_parser import parse_user_intent
 from bot.keyboards.inline import get_entry_confirm_keyboard, get_tasks_keyboard
 from bot.handlers.states import GarageEntryState
 from bot.services.draft_store import save_draft
-from bot.services.assistant import answer_query
+from bot.services.assistant import answer_query, stream_assistant_response
 from bot.services.formatters import send_formatted_message
 from bot.emojis import (
     E_DROP,
@@ -225,17 +225,14 @@ async def handle_voice_entry(message: Message, bot: Bot, state: FSMContext):
             wait_text = f"{E_SEARCH} <i>Ищу информацию в интернете...</i>" if needs_web else f"{E_THINK} <i>Думаю над ответом...</i>"
             assistant_wait_msg = await message.answer(wait_text)
             try:
-                answer = await answer_query(
+                answer = await stream_assistant_response(
+                    message=message,
                     user_query=user_query,
                     needs_web=needs_web,
                     search_query=search_query,
-                    history=history
+                    history=history,
+                    status_msg=assistant_wait_msg
                 )
-                try:
-                    await assistant_wait_msg.delete()
-                except Exception:
-                    pass
-                await send_formatted_message(message, answer)
 
                 # Сохраняем реплику и ответ в историю диалога
                 async with get_session() as session:
@@ -255,12 +252,13 @@ async def handle_voice_entry(message: Message, bot: Bot, state: FSMContext):
             if transcript and len(transcript.strip()) > 3:
                 assistant_wait_msg = await message.answer(f"{E_THINK} <i>Секунду...</i>")
                 try:
-                    answer = await answer_query(user_query=transcript, needs_web=False, history=history)
-                    try:
-                        await assistant_wait_msg.delete()
-                    except Exception:
-                        pass
-                    await send_formatted_message(message, answer)
+                    answer = await stream_assistant_response(
+                        message=message,
+                        user_query=transcript,
+                        needs_web=False,
+                        history=history,
+                        status_msg=assistant_wait_msg
+                    )
 
                     async with get_session() as session:
                         await crud.add_chat_message(session, user_id=user_id, role="user", content=transcript)
