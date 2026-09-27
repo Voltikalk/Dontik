@@ -4,13 +4,18 @@ import asyncio
 import logging
 from typing import Optional, List, Dict, AsyncGenerator
 from openai import AsyncOpenAI
-from aiogram.types import Message, LinkPreviewOptions, InputRichMessage
+from aiogram.types import Message, LinkPreviewOptions
 from aiogram.enums import ParseMode
 
 from bot.config import settings
 from bot.services.web_search import search_web
 from bot.emojis import E_SEARCH, E_THINK, E_ALERT
-from bot.services.formatters import md_to_telegram_html, send_formatted_message, convert_rich_tags_to_unicode
+from bot.services.formatters import (
+    md_to_telegram_html,
+    send_formatted_message,
+    convert_rich_tags_to_unicode,
+    fix_squished_bullets
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +32,14 @@ ASSISTANT_SYSTEM_PROMPT = """Ты — универсальный персона�
    - ЗАПРЕЩЕНЫ вводные предисловия («Конечно!», «Рад помочь!», «Ниже собраны проверенные источники...», «Вот подробная информация...»). Сразу переходи к сути вопроса!
    - ЗАПРЕЩЕНЫ шаблонные концовки («Если возникнут вопросы, обращайтесь!», «Для полного изучения откройте указанные ресурсы...», «Дай знать, если нужен другой формат»).
 
-3. КОМПАКТНОСТЬ, СТРУКТУРА И ЧИТАБЕЛЬНОСТЬ СПИСКОВ:
-   - Дели объемную информацию на логические смысловые блоки с четкими краткими подзаголовками (**Жирный заголовок**).
-   - Для списков, этапов, хронологий и родословных используй компактный однострочный формат:
-     • **Имя / Название** (период, ключевая дата или параметр) — краткая суть или главное достижение в одно предложение.
+3. СТРОГИЕ ПРАВИЛА ОФОРМЛЕНИЯ СПИСКОВ:
+   - Каждый пункт списка ОБЯЗАТЕЛЬНО должен начинаться с НОВОЙ СТРОКИ:
+     • **Имя / Название** (период, дата или параметр) — краткая суть или главное достижение в одно предложение.
+   - КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО объединять несколько пунктов списка в одну строку через точку « • »! Каждый пункт — строго отдельная строка с отступом.
+   - Заголовок блока ВСЕГДА отделяй от списка переводом строки:
+     **Интегралы для практики:**
+     • Пункт 1
+     • Пункт 2
    - КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО раздувать один элемент на 4-5 отдельных строк с повторением ярлыков («Правитель: ...», «Годы жизни: ...», «Примечание: ...»)! Это засоряет экран и делает текст нечитабельным.
    - Для родословных и иерархий показывай преемственность наглядно через ветви или стрелки:
      • **Михаил Фёдорович** (1613–1645) — основатель династии
@@ -43,27 +52,18 @@ ASSISTANT_SYSTEM_PROMPT = """Ты — универсальный персона�
    - ЗАПРЕЩЕНО вставлять длинные голые URL в текст сообщений. Если уместно дать источники (для интерактивных схем или проверки данных), укажи их в самом конце одной компактной строкой через Markdown-ссылки:
      🔗 **Источники:** [Википедия](URL) • [Название](URL)
 
-5. ПРАВИЛА ВЫВОДА МАТЕМАТИКИ (Rich Messages с нативным KaTeX рендерингом):
-   - Telegram Bot API 10.1+ нативно рендерит математику через KaTeX!
-   - Inline-формулы (внутри строк и списков) ВСЕГДА оборачивай в <tg-math>...</tg-math>.
-     Пример: • <tg-math>\\int \\frac{\\sin x}{x} dx</tg-math> (специальная функция) — интегральный синус
-     Пример: • <tg-math>\\int \\frac{dx}{(x+1)^2}</tg-math> (замена переменной) — подставьте u = x+1
-     Пример: где <tg-math>G \\approx 0.9159</tg-math> — каталогово число.
-   - Выключные формулы (на отдельной строке) ВСЕГДА оборачивай в <tg-math-block>...</tg-math-block>.
-     Пример:
-     <tg-math-block>\\int_0^1 x^{-x} dx = \\sum_{n=1}^\\infty \\frac{1}{n^n} \\approx 1.2913</tg-math-block>
-     Пример:
-     <tg-math-block>\\int_0^{\\pi/4} \\ln(\\tan x) dx = -G</tg-math-block>
-   - Внутри тегов пиши чистый LaTeX без делимитров $...$, $$...$, \\(...\\), \\[...\\].
-   - Используй стандартные LaTeX-команды: \\int, \\sum, \\frac, \\pi, \\infty, \\zeta, \\sqrt, \\sin, \\cos, \\ln, \\Gamma, \\approx.
-   - Дроби в степенях всегда заключай в фигурные скобки: x^{s-1}, e^{-x^2}, e^{-b^2}, x^{3/2}.
-   - КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО заменять LaTeX на псевдо-символы Unicode (∫, ∑, ², ³) внутри формул — пиши чистый LaTeX (\\int, \\sum, ^2, ^3).
-   - КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО оборачивать теги <tg-math> или <tg-math-block> в звездочки жирного шрифта (**<tg-math>...</tg-math>**)! Звездочки внутри KaTeX ломают формулу.
-   - КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО помещать русский текст, пояснения или скобки внутрь <tg-math> или <tg-math-block>! Внутри тегов должен быть ТОЛЬКО чистый математический LaTeX. Все русские слова, скобки и пояснения пиши СТРОГО снаружи формулы обычным текстом.
-   - Вне математики используй обычный текст или HTML-теги: <b>, <i>, <code>, <blockquote>.
-   - Не оборачивай формулы в <code> или <pre> — для математики есть специальные теги <tg-math> и <tg-math-block>.
-   - ИТОГОВЫЙ ответ или главную формулу при пошаговом решении выделяй через \\boxed{...}:
-     <tg-math-block>\\boxed{I = \\frac{\\pi^4}{15}}</tg-math-block>
+5. ПРАВИЛА ВЫВОДА МАТЕМАТИКИ И ФОРМУЛ:
+   - Для формул и математических вычислений используй стандартную математическую запись:
+     • Ключевые уравнения, формулы и шаги решения выделяй отдельными блоками: $$ ... $$ или цитатой (> **формула**), чтобы они красиво выделялись в Telegram.
+     • Внутри текста используй $...$ или понятные Unicode-символы: ⁰, ¹, ², ³, ⁴, ⁿ, ˣ, ⁻¹, ₀, ₁, ₂, ₙ, √, ±, ≈, ≠, ≤, ≥, ·, ÷, −, π, ∫, ∑, ∞, tg, sin, cos, ln.
+     • Дроби пиши в виде a / b или \\frac{a}{b}.
+     • Степени пиши через фигурные скобки e^{x^2} или Unicode x².
+   - Каждый математический пример в списке пиши строго с НОВОЙ СТРОКИ:
+     • $\\int x e^{x^2} dx$ — подстановка $u = x^2$
+     • $\\int \\frac{\\sin x}{x} dx$ — специальная функция $\\text{Si}(x)$
+     • $\\int \\frac{dx}{(x^2+1)^2}$ — тригонометрическая подстановка $x = \\text{tg}\\,\\theta$
+   - ИТОГОВЫЙ ответ или главную формулу при пошаговом решении выделяй через \\boxed{...} или отдельным блоком:
+     > **I = π⁴ / 15**
 """
 
 
@@ -234,7 +234,7 @@ async def stream_query_answer(
 
 def clean_for_preview(text: str) -> str:
     """Очищает промежуточный текст для аккуратного отображения курсора при живом наборе."""
-    s = text
+    s = fix_squished_bullets(text)
     s = re.sub(r'</?(?:tg-math|tg-math-block)[^>]*?>?', '', s)
     s = re.sub(r'</?(?:b|i|u|s|code|pre|blockquote|a|tg-emoji)[^>]*?>?', '', s)
     s = s.replace(r'\int', '∫').replace(r'\sum', '∑').replace(r'\infty', '∞')
@@ -256,8 +256,7 @@ async def stream_assistant_response(
     Осуществляет плавный потоковый вывод ответа ассистента в Telegram в реальном времени.
     - Обновляет сообщение каждые 0.35-0.5 секунды с эффектом живого набора текста (курсор ▌).
     - При быстром получении ответа обеспечивает визуальную плавность появления.
-    - Редактирует сообщение НА МЕСТЕ без удалений и мигания: нативный KaTeX рендеринг через
-      Rich Messages API (edit_message_text с rich_message) или красивый HTML.
+    - Редактирует сообщение НА МЕСТЕ без лишних удалений и мигания в красивый, валидный Telegram HTML.
     - Возвращает полный итоговый текст ответа для сохранения в историю диалога.
     """
     if status_msg is None:
@@ -329,8 +328,7 @@ async def stream_assistant_response(
                 pass
 
     final_html = md_to_telegram_html(full_text)
-    has_rich_math = bool(re.search(r'</?(?:tg-math|tg-math-block)\b', final_html, re.IGNORECASE))
-    is_long = len(full_text) > 3800
+    is_long = len(final_html) > 3800
 
     if is_long:
         # Для слишком длинных сообщений (>3800 символов) удаляем статус и отправляем частями
@@ -339,21 +337,21 @@ async def stream_assistant_response(
         except Exception:
             pass
         await send_formatted_message(message, full_text)
-    elif has_rich_math:
-        # Редактируем сообщение НА МЕСТЕ в нативный Rich Message с KaTeX
+    else:
+        # Редактируем сообщение НА МЕСТЕ без лишних удалений и мигания
         try:
             await status_msg.edit_text(
-                "...",
-                rich_message=InputRichMessage(html=final_html),
+                final_html,
+                parse_mode=ParseMode.HTML,
                 link_preview_options=LinkPreviewOptions(is_disabled=True)
             )
         except Exception as e:
-            logger.warning(f"Ошибка edit_text с rich_message: {e}. Переключаемся на Unicode fallback...")
-            fallback_html = convert_rich_tags_to_unicode(final_html)
+            logger.warning(f"Ошибка edit_text с HTML: {e}. Переключаемся на plain text...")
             try:
+                plain_txt = re.sub(r'</?[^>]+>', '', final_html)
                 await status_msg.edit_text(
-                    fallback_html,
-                    parse_mode=ParseMode.HTML,
+                    plain_txt,
+                    parse_mode=None,
                     link_preview_options=LinkPreviewOptions(is_disabled=True)
                 )
             except Exception:
@@ -362,19 +360,5 @@ async def stream_assistant_response(
                 except Exception:
                     pass
                 await send_formatted_message(message, full_text)
-    else:
-        # Стандартный текст без формул — обновляем текущий пузырь
-        try:
-            await status_msg.edit_text(
-                final_html,
-                parse_mode=ParseMode.HTML,
-                link_preview_options=LinkPreviewOptions(is_disabled=True)
-            )
-        except Exception:
-            try:
-                await status_msg.delete()
-            except Exception:
-                pass
-            await send_formatted_message(message, full_text)
 
     return full_text

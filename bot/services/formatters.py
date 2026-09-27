@@ -245,6 +245,7 @@ def to_sup(text: str) -> str:
     """Конвертирует строку в надстрочные символы Unicode с поддержкой дробей и греческих букв."""
     for k, v in GREEK_MATH_MAP.items():
         text = text.replace(k, v)
+    text = text.replace('^', '')
     return "".join(SUPERSCRIPTS.get(c, c) for c in text)
 
 
@@ -252,6 +253,7 @@ def to_sub(text: str) -> str:
     """Конвертирует строку в подстрочные символы Unicode."""
     for k, v in GREEK_MATH_MAP.items():
         text = text.replace(k, v)
+    text = text.replace('_', '')
     return "".join(SUBSCRIPTS.get(c, c) for c in text)
 
 
@@ -290,6 +292,13 @@ def preprocess_latex(s: str) -> str:
     s = re.sub(r'\\,\s*', ' ', s)
     s = re.sub(r'\\[;!]', ' ', s)
 
+    # Пробелы после функций и перевод в стандартную русскую нотацию
+    s = re.sub(r'([a-zA-Z0-9])\\(sin|cos|tan|cot|ln|log|exp|arcsin|arccos|arctan)\b', r'\1 \\\2', s)
+    s = re.sub(r'\\(sin|cos|tan|cot|ln|log|exp|arcsin|arccos|arctan)\b(?!\s)', r'\\\1 ', s)
+    s = re.sub(r'\\tan\b', 'tg', s)
+    s = re.sub(r'\\cot\b', 'ctg', s)
+    s = re.sub(r'\\arctan\b', 'arctg', s)
+
     # Пределы интегралов и сумм ДО удаления скобок парсером
     s = re.sub(r'\\int_0\^\\?infty\b', '∫₀^∞ ', s)
     s = re.sub(r'\\int_\{0\}\^\{\\?infty\}', '∫₀^∞ ', s)
@@ -322,8 +331,14 @@ def postprocess_unicode_math(text: str) -> str:
     # 4. Пробелы вокруг знаков равенства
     text = re.sub(r'([a-zA-Zα-ωΑ-Ω0-9])=([0-9a-zA-Zα-ωΑ-Ω])', r'\1 = \2', text)
     text = re.sub(r'([a-zA-Zα-ωΑ-Ω0-9])=\s+', r'\1 = ', text)
+    # 4.1 Пробелы вокруг + и - в выражениях вроде a² + b²
+    text = re.sub(r'([a-zA-Z0-9⁰-⁹ᵃ-ᶻ\)])\+([a-zA-Z0-9⁰-⁹ᵃ-ᶻ\(])', r'\1 + \2', text)
+    text = re.sub(r'([a-zA-Z0-9⁰-⁹ᵃ-ᶻ\)])\-([a-zA-Z0-9⁰-⁹ᵃ-ᶻ\(])', r'\1 - \2', text)
     # 5. Умножение
     text = text.replace(' * ', ' · ')
+    # 5.1 Пробелы для функций: sinx -> sin x, cosbx -> cos bx
+    text = re.sub(r'\b(sin|cos|tg|ctg|ln|log|exp|arcsin|arccos|arctg)([a-zA-Z0-9]+)\b', r'\1 \2', text)
+    text = re.sub(r'([a-zA-Z0-9])·(cos|sin|tg|ctg|ln|log|exp)\b', r'\1 \2', text)
     # 6. Лишние пробелы
     text = re.sub(r' {2,}', ' ', text)
     return text.strip()
@@ -494,19 +509,172 @@ def convert_markdown_tables(text: str) -> str:
     return "\n".join(new_lines)
 
 
+def fix_squished_bullets(text: str) -> str:
+    """
+    Разделяет слипшиеся пункты списков в одну строку (например: «Заголовок • пункт 1 • пункт 2»)
+    на отдельные строки, сохраняя структуру списков Telegram.
+    При этом не разбивает компактную строку источников в конце сообщения.
+    """
+    lines = text.split('\n')
+    new_lines = []
+    for line in lines:
+        stripped = line.strip()
+        # Если строка источников приклеена к концу списка через точку:
+        m = re.search(r'(\s*•\s*)?(🔗\s*(?:\*\*)?Источники:.*)', line)
+        if m and line.strip() != m.group(0).strip():
+            content_part = line[:m.start()].strip()
+            sources_part = m.group(2).strip()
+            if content_part:
+                new_lines.append(fix_squished_bullets(content_part))
+            new_lines.append(sources_part)
+            continue
+
+        if ' • ' in line:
+            parts = line.split(' • ')
+            if len(parts) > 1:
+                first = parts[0].strip()
+                res = []
+                if first:
+                    if not first.endswith((':', '.', '!', '?')):
+                        first += ':'
+                    res.append(first)
+                for p in parts[1:]:
+                    p_clean = p.strip()
+                    if p_clean:
+                        res.append(f"• {p_clean}")
+                new_lines.append('\n'.join(res))
+                continue
+        new_lines.append(line)
+    return '\n'.join(new_lines)
+
+
+def parse_balanced_braces(s: str, start_idx: int):
+    """Находит индекс закрывающей фигурной скобки для скобки на start_idx с учетом вложенности."""
+    if start_idx >= len(s) or s[start_idx] != '{':
+        return None
+    depth = 0
+    for i in range(start_idx, len(s)):
+        if s[i] == '{':
+            depth += 1
+        elif s[i] == '}':
+            depth -= 1
+            if depth == 0:
+                return i
+    return None
+
+
+def convert_all_fracs(text: str) -> str:
+    """Рекурсивно находит и преобразует все \\frac{A}{B} в формат (A) / (B)."""
+    while r'\frac{' in text:
+        idx = text.find(r'\frac{')
+        num_start = idx + 5
+        num_end = parse_balanced_braces(text, num_start)
+        if num_end is None:
+            break
+        num = text[num_start + 1:num_end]
+        den_start = num_end + 1
+        while den_start < len(text) and text[den_start].isspace():
+            den_start += 1
+        if den_start >= len(text) or text[den_start] != '{':
+            break
+        den_end = parse_balanced_braces(text, den_start)
+        if den_end is None:
+            break
+        den = text[den_start + 1:den_end]
+
+        num_conv = convert_all_fracs(num)
+        den_conv = convert_all_fracs(den)
+        num_math = convert_latex_math(num_conv)
+        den_math = convert_latex_math(den_conv)
+
+        has_op_num = any(c in num_math for c in ['+', '-', '='])
+        has_op_den = any(c in den_math for c in ['+', '-', '='])
+        n_str = f"({num_math})" if has_op_num else num_math
+        d_str = f"({den_math})" if has_op_den else den_math
+
+        repl = f"{n_str} / {d_str}"
+        text = text[:idx] + repl + text[den_end + 1:]
+    return text
+
+
+def clean_raw_latex_in_text(line: str) -> str:
+    """Преобразует оставшиеся команды LaTeX в обычный красивый Unicode-текст."""
+    # 1. Дроби \frac{...}{...}
+    line = convert_all_fracs(line)
+
+    # 2. Греческие буквы и математические операторы
+    replacements = [
+        (r'\\to\b', '→'),
+        (r'->', '→'),
+        (r'\\approx\b', '≈'),
+        (r'\\neq\b', '≠'),
+        (r'\\le\b', '≤'),
+        (r'\\ge\b', '≥'),
+        (r'\\pm\b', '±'),
+        (r'\\times\b', '×'),
+        (r'\\cdot\b', '·'),
+        (r'\\tan\b', 'tg'),
+        (r'\\cot\b', 'ctg'),
+        (r'\\arctan\b', 'arctg'),
+        (r'\\sin\b', 'sin'),
+        (r'\\cos\b', 'cos'),
+        (r'\\arcsin\b', 'arcsin'),
+        (r'\\arccos\b', 'arccos'),
+        (r'\\ln\b', 'ln'),
+        (r'\\log\b', 'log'),
+        (r'\\exp\b', 'exp'),
+        (r'\\zeta\b', 'ζ'),
+        (r'\\theta\b', 'θ'),
+        (r'\\pi\b', 'π'),
+        (r'\\infty\b', '∞'),
+        (r'\\alpha\b', 'α'),
+        (r'\\beta\b', 'β'),
+        (r'\\gamma\b', 'γ'),
+        (r'\\delta\b', 'δ'),
+        (r'\\lambda\b', 'λ'),
+        (r'\\mu\b', 'μ'),
+        (r'\\sigma\b', 'σ'),
+        (r'\\phi\b', 'φ'),
+        (r'\\omega\b', 'ω'),
+        (r'\\sqrt\{([^}]+)\}', r'√(\1)'),
+    ]
+    for pattern, repl in replacements:
+        line = re.sub(pattern, repl, line)
+
+    # 3. Степени: a^{2} -> a², x^2 -> x², e^{ax} -> eᵃˣ
+    line = re.sub(r'\^\{([^}]+)\}', lambda m: to_sup(m.group(1)), line)
+    line = re.sub(r'([a-zA-Z0-9π\(\)])\^([0-9a-zA-Zα-ω]+)', lambda m: m.group(1) + to_sup(m.group(2)), line)
+    # 4. Индексы: x_{1} -> x₁, x_1 -> x₁
+    line = re.sub(r'_\{([^}]+)\}', lambda m: to_sub(m.group(1)), line)
+    line = re.sub(r'([a-zA-Z0-9\(\)])_([0-9a-zA-Z]+)', lambda m: m.group(1) + to_sub(m.group(2)), line)
+
+    # 4.1 Пробелы вокруг + и -: a²+b² -> a² + b²
+    line = re.sub(r'([a-zA-Z0-9⁰-⁹ᵃ-ᶻ\)])\+([a-zA-Z0-9⁰-⁹ᵃ-ᶻ\(])', r'\1 + \2', line)
+    line = re.sub(r'([a-zA-Z0-9⁰-⁹ᵃ-ᶻ\)])\-([a-zA-Z0-9⁰-⁹ᵃ-ᶻ\(])', r'\1 - \2', line)
+
+    # 5. Пробелы в функциях
+    line = re.sub(r'\b(sin|cos|tg|ctg|ln|log|exp|arcsin|arccos|arctg)([a-zA-Z0-9]+)\b', r'\1 \2', line)
+    line = re.sub(r'([a-zA-Z0-9])·(cos|sin|tg|ctg|ln|log|exp)\b', r'\1 \2', line)
+    return line
+
+
 def md_to_telegram_html(text: str) -> str:
     """
     Конвертирует Markdown и математику в валидный, красивый HTML для Telegram:
+    - Разделяет склеенные в одну строку списки на аккуратные пункты.
     - Преобразует Markdown-таблицы в аккуратные списки без палочек.
     - Блоки формул и вычислений преобразует в аккуратные цитаты <blockquote><b>...</b></blockquote>.
-    - Всю математическую нотацию (LaTeX, степени, корни, индексы) переводит в Unicode внутри формул.
-    - Блоки настоящего программного кода (python, bash, js и т.д.) оформляет в <pre><code class="language-...">.
+    - Всю математическую нотацию (LaTeX, степени, корни, индексы) переводит в чистый Unicode.
+    - Блоки настоящего программного кода оформляет в <pre><code class="language-...">.
     - Сохраняет уже имеющиеся валидные HTML-теги и экранирует спецсимволы.
     """
     if not text:
         return ""
 
-    # 0. Преобразуем неудобочитаемые таблицы Markdown в красивые списки
+    # 0. Исправляем склеенные в одну строку пункты списков (если модель ошиблась)
+    text = fix_squished_bullets(text)
+
+    # 0.1 Преобразуем неудобочитаемые таблицы Markdown в красивые списки
     text = convert_markdown_tables(text)
 
     code_blocks = []
@@ -517,7 +685,8 @@ def md_to_telegram_html(text: str) -> str:
     # 1. Выделяем блоки математики в тройных кавычках: ```latex ... ``` или ```math ... ```
     def save_math_code_block(m):
         raw_inner = m.group(1).strip()
-        math_blocks.append(raw_inner)
+        conv = convert_latex_math(raw_inner)
+        math_blocks.append(conv)
         return f"\nXXMATHBLOCK{len(math_blocks)-1}XX\n"
 
     text = re.sub(r'```(?:latex|math)\n?([\s\S]*?)```', save_math_code_block, text)
@@ -539,46 +708,49 @@ def md_to_telegram_html(text: str) -> str:
     # 3.1 Нормализуем неполный Unicode интеграл с LaTeX слешем (∫\ln -> \int \ln)
     text = re.sub(r'∫\s*\\', r'\\int \\', text)
 
-    # 3.2 Формулы в двойных звездочках (**\frac{...}{...}** или **\int ...**) переводим в <tg-math>
+    # 3.2 Формулы в двойных звездочках (**\frac{...}{...}** или **\int ...**) переводим в жирный Unicode
     def clean_bold_math(m):
         inner = m.group(1).strip()
-        if inner.startswith(('<tg-math', '<tg-math-block')):
-            return inner
         if '\\' in inner and any(k in inner for k in ['frac', 'int', 'sum', 'prod', 'sqrt', 'sin', 'cos', 'dx', 'zeta', 'lim']):
-            return f"<tg-math>{inner}</tg-math>"
+            conv = convert_latex_math(inner)
+            math_inlines.append(conv)
+            return f"XXMATHINLINE{len(math_inlines)-1}XX"
         return m.group(0)
 
     text = re.sub(r'\*\*\s*([^\n*]+?)\s*\*\*', clean_bold_math, text)
 
     # 3.3 Если пункт списка начинается с формулы LaTeX без тега:
-    # • \frac{...}{...} (пояснение) -> • <tg-math>\frac{...}{...}</tg-math> (пояснение)
+    # • \frac{...}{...} (пояснение) -> • <b>(формула в Unicode)</b> (пояснение)
     def clean_bullet_math(m):
         bullet = m.group(1)
         formula = m.group(2).strip()
-        rest = m.group(3)
-        return f"{bullet}<tg-math>{formula}</tg-math>{rest}"
+        conv = convert_latex_math(formula)
+        math_inlines.append(conv)
+        return f"{bullet}XXMATHINLINE{len(math_inlines)-1}XX"
 
     text = re.sub(
-        r'(^[ \t]*[•\-\*]\s*)(\\(?:frac|int|iint|iiint|sum|prod|sqrt|boxed|zeta)\b(?:[^{}\s\n]*\{[^}]*\})*[\w\^_\(\)\+\-\*\/\s\\\,]*?)(\s*(?:—|–|\:\s|\([а-яА-ЯёЁ]|[а-яА-ЯёЁ])[^\n]*)',
+        r'^[ \t]*([•\-\*]\s*)(\\(?:int|iint|iiint|sum|prod|sqrt|frac|boxed|zeta)\b.+?)(?=\s*(?:[—–\-:]|\([а-яА-ЯёЁ]|[а-яА-ЯёЁ]|$))',
         clean_bullet_math,
         text,
         flags=re.MULTILINE
     )
 
-    # 4. Блочные формулы: <tg-math-block>, $$ ... $$ и \[ ... \] -> сохраняем как нативные <tg-math-block>
+    # 4. Блочные формулы: <tg-math-block>, $$ ... $$ и \[ ... \] -> преобразуем в блоки цитат Telegram
     def save_display_math(m):
         raw_inner = m.group(1).strip()
-        math_blocks.append(raw_inner)
+        conv = convert_latex_math(raw_inner)
+        math_blocks.append(conv)
         return f"\nXXMATHBLOCK{len(math_blocks)-1}XX\n"
 
     text = re.sub(r'<tg-math-block>([\s\S]*?)</tg-math-block>', save_display_math, text, flags=re.IGNORECASE)
     text = re.sub(r'\$\$([\s\S]*?)\$\$', save_display_math, text)
     text = re.sub(r'\\\[([\s\S]*?)\\\]', save_display_math, text)
 
-    # 5. Инлайн формулы: <tg-math>, $ ... $ и \( ... \) -> сохраняем как нативные <tg-math>
+    # 5. Инлайн формулы: <tg-math>, $ ... $ и \( ... \) -> преобразуем в жирный Unicode
     def save_inline_math(m):
         raw_inner = m.group(1).strip()
-        math_inlines.append(raw_inner)
+        conv = convert_latex_math(raw_inner)
+        math_inlines.append(conv)
         return f"XXMATHINLINE{len(math_inlines)-1}XX"
 
     text = re.sub(r'<tg-math>([\s\S]*?)</tg-math>', save_inline_math, text, flags=re.IGNORECASE)
@@ -586,12 +758,13 @@ def md_to_telegram_html(text: str) -> str:
     text = re.sub(r'\\\((.+?)\\\)', save_inline_math, text)
 
     # 5.1 Обрабатываем строки с явными формулами LaTeX (\int, \frac, \sum, \sqrt, \zeta, \boxed),
-    # ТОЛЬКО если вся строка состоит чисто из формулы (без кириллицы и без маркеров списка)
+    # если вся строка состоит чисто из формулы
     def save_unwrapped_math_line(m):
         raw_line = m.group(0).strip()
         if re.search(r'[а-яА-ЯёЁ]', raw_line) or re.match(r'^[•\-\*]\s+', raw_line):
             return m.group(0)
-        math_blocks.append(raw_line)
+        conv = convert_latex_math(raw_line)
+        math_blocks.append(conv)
         return f"\nXXMATHBLOCK{len(math_blocks)-1}XX\n"
 
     text = re.sub(
@@ -601,8 +774,9 @@ def md_to_telegram_html(text: str) -> str:
         flags=re.MULTILINE
     )
 
-    # 5.2 Снимаем звездочки жирного шрифта вокруг математических блоков, если они остались
-    text = re.sub(r'\*\*\s*(XXMATH(?:INLINE|BLOCK)\d+XX)\s*\*\*', r'\1', text)
+    # 5.2 Очищаем любые оставшиеся команды LaTeX в обычном тексте (\frac, \to, \tan, etc.)
+    lines = [clean_raw_latex_in_text(l) for l in text.split('\n')]
+    text = '\n'.join(lines)
 
     # 6. Сохраняем УЖЕ существующие валидные Telegram HTML теги (<b>, </b>, <i>, </i>, <code>, </code>, <blockquote>, </blockquote>, <a>, </a>)
     valid_tags = []
@@ -647,19 +821,19 @@ def md_to_telegram_html(text: str) -> str:
 
     text = re.sub(r'XXVALIDTAG(\d+)XX', restore_valid_tag, text)
 
-    # 14. Восстанавливаем блоки формул как нативные <tg-math-block>...</tg-math-block>
+    # 14. Восстанавливаем блоки формул в виде красивых Telegram blockquote
     def restore_math_block(m):
         idx = int(m.group(1))
-        content = math_blocks[idx].strip()
-        return f"<tg-math-block>{content}</tg-math-block>"
+        content = py_html.escape(math_blocks[idx], quote=False)
+        return f"<blockquote><b>{content}</b></blockquote>"
 
     text = re.sub(r'XXMATHBLOCK(\d+)XX', restore_math_block, text)
 
-    # 15. Восстанавливаем инлайн формулы как нативные <tg-math>...</tg-math>
+    # 15. Восстанавливаем инлайн формулы в виде жирного Unicode
     def restore_math_inline(m):
         idx = int(m.group(1))
-        content = math_inlines[idx].strip()
-        return f"<tg-math>{content}</tg-math>"
+        content = py_html.escape(math_inlines[idx], quote=False)
+        return f"<b>{content}</b>"
 
     text = re.sub(r'XXMATHINLINE(\d+)XX', restore_math_inline, text)
 
@@ -693,10 +867,7 @@ def md_to_telegram_html(text: str) -> str:
 
 
 def convert_rich_tags_to_unicode(html_text: str) -> str:
-    """
-    Преобразует нативные теги Rich Messages (<tg-math-block>, <tg-math>)
-    в резервный Unicode HTML, если клиент или API не поддерживает Rich Messages.
-    """
+    """Резервная функция для конвертации тегов Rich Message в Unicode HTML."""
     def replace_block(m):
         raw = m.group(1).strip()
         is_boxed = r'\boxed{' in raw or r'\boxed ' in raw
@@ -746,15 +917,13 @@ def split_telegram_chunks(text: str, max_chunk_size: int = 3800) -> list[str]:
 async def send_formatted_message(message: Message, text: str, reply_markup=None):
     """
     Отправляет пользователю сообщение с красивой разметкой и формулами.
-    - Автоматически использует Telegram Bot API 10.1+ Rich Messages (sendRichMessage) для нативного
-      рендеринга LaTeX формул (<tg-math> и <tg-math-block>) через KaTeX.
-    - При возникновении любой ошибки автоматически переключается на Unicode HTML fallback.
-    - Разбивает длинные сообщения с сохранением структуры абзацев.
+    - Разбивает исходный текст на части с сохранением структуры строк и абзацев ДО конвертации в HTML.
+    - Форматирует математические выражения в элегантный, легко читаемый Unicode HTML.
+    - При возникновении ошибки парсинга Telegram HTML безопасно отправляет plain text без потери содержимого.
+    - Отключает предпросмотр веб-ссылок.
     """
     if not text:
         return
-
-    from aiogram.types import InputRichMessage
 
     # Разбиваем исходный текст с запасом по размеру (3200 символов), чтобы после HTML-тегов не превысить 4096
     raw_chunks = split_telegram_chunks(text, max_chunk_size=3200)
@@ -764,40 +933,6 @@ async def send_formatted_message(message: Message, text: str, reply_markup=None)
         kb = reply_markup if is_last else None
         html_chunk = md_to_telegram_html(raw_chunk)
 
-        # Проверяем наличие нативных математических тегов
-        has_rich_math = bool(re.search(r'</?(?:tg-math|tg-math-block)\b', html_chunk, re.IGNORECASE))
-
-        if has_rich_math:
-            try:
-                await message.bot.send_rich_message(
-                    chat_id=message.chat.id,
-                    rich_message=InputRichMessage(html=html_chunk),
-                    reply_markup=kb,
-                    message_thread_id=message.message_thread_id
-                )
-                continue
-            except Exception as e:
-                logger.warning(f"Ошибка при отправке Rich Message: {e}. Переключаемся на Unicode fallback...")
-                fallback_html = convert_rich_tags_to_unicode(html_chunk)
-                try:
-                    await message.answer(
-                        fallback_html,
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=kb,
-                        link_preview_options=LinkPreviewOptions(is_disabled=True)
-                    )
-                    continue
-                except Exception as e2:
-                    logger.warning(f"Fallback HTML тоже не удался: {e2}. Отправка в plain text...")
-                    await message.answer(
-                        raw_chunk,
-                        parse_mode=None,
-                        reply_markup=kb,
-                        link_preview_options=LinkPreviewOptions(is_disabled=True)
-                    )
-                    continue
-
-        # Если формул нет — отправляем стандартным сообщением
         try:
             await message.answer(
                 html_chunk,
@@ -807,10 +942,19 @@ async def send_formatted_message(message: Message, text: str, reply_markup=None)
             )
         except Exception as e:
             logger.warning(f"Ошибка отправки сообщения в формате HTML: {e}. Отправка в plain text...")
-            await message.answer(
-                raw_chunk,
-                parse_mode=None,
-                reply_markup=kb,
-                link_preview_options=LinkPreviewOptions(is_disabled=True)
-            )
+            plain_txt = re.sub(r'</?[^>]+>', '', html_chunk)
+            try:
+                await message.answer(
+                    plain_txt,
+                    parse_mode=None,
+                    reply_markup=kb,
+                    link_preview_options=LinkPreviewOptions(is_disabled=True)
+                )
+            except Exception:
+                await message.answer(
+                    raw_chunk,
+                    parse_mode=None,
+                    reply_markup=kb,
+                    link_preview_options=LinkPreviewOptions(is_disabled=True)
+                )
 
