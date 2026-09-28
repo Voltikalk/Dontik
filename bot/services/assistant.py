@@ -16,8 +16,7 @@ from bot.services.formatters import (
     convert_rich_tags_to_unicode,
     fix_squished_bullets
 )
-from bot.services.message_splitter import parse_response_segments
-from bot.services.math_render import send_rendered_segments
+from bot.services.rich_message import send_rich_response, send_rich_draft_update
 
 logger = logging.getLogger(__name__)
 
@@ -328,24 +327,11 @@ async def stream_assistant_response(
             except Exception:
                 pass
 
-    segments = parse_response_segments(full_text)
-    if segments:
-        await send_rendered_segments(
-            bot=message.bot,
-            chat_id=message.chat.id,
-            segments=segments,
-            reply_to_message_id=message.message_id,
-            status_msg=status_msg
-        )
-    else:
-        final_html = md_to_telegram_html(full_text)
-        try:
-            await status_msg.edit_text(
-                final_html,
-                parse_mode=ParseMode.HTML,
-                link_preview_options=LinkPreviewOptions(is_disabled=True)
-            )
-        except Exception:
-            await send_formatted_message(message, full_text)
+    await send_rich_response(
+        bot=message.bot,
+        chat_id=message.chat.id,
+        raw_markdown=full_text,
+        status_msg=status_msg
+    )
 
     return full_text

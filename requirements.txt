@@ -11,3 +11,4 @@ openpyxl>=3.1.0
 pillow>=10.0.0
 pymupdf>=1.24.0
 pylatexenc>=2.11
+tg-rich-converter>=0.5.1

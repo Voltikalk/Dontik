@@ -925,22 +925,18 @@ async def send_formatted_message(message: Message, text: str, reply_markup=None)
         return
 
     try:
-        from bot.services.message_splitter import parse_response_segments
-        from bot.services.math_render import send_rendered_segments
-        segments = parse_response_segments(text)
-        if segments:
-            await send_rendered_segments(
-                bot=message.bot,
-                chat_id=message.chat.id,
-                segments=segments,
-                reply_to_message_id=message.message_id,
-                reply_markup=reply_markup
-            )
-            return
+        from bot.services.rich_message import send_rich_response
+        await send_rich_response(
+            bot=message.bot,
+            chat_id=message.chat.id,
+            raw_markdown=text,
+            reply_markup=reply_markup
+        )
+        return
     except Exception as e:
-        logger.warning(f"Ошибка при отправке сегментированного сообщения: {e}. Фолбэк на стандартную отправку...")
+        logger.warning(f"Ошибка при отправке rich message: {e}. Фолбэк на стандартную отправку...")
 
-    # Резервная отправка (если парсер сегментов не вернул элементов)
+    # Резервная отправка через sendMessage
     raw_chunks = split_telegram_chunks(text, max_chunk_size=3200)
 
     for i, raw_chunk in enumerate(raw_chunks):
