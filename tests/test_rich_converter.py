@@ -96,6 +96,84 @@ class TestRichConverter(unittest.TestCase):
         self.assertIn("<tg-math>x^2 + y^2 = 1</tg-math>", html)
         self.assertIn("<tg-math>\\alpha = \\pi/4</tg-math>", html)
 
+    def test_markdown_lists(self):
+        """Маркированные списки превращаются в <ul><li>...</li></ul>."""
+        text = "- Пункт 1\n- Пункт 2\n- Пункт 3"
+        html = markdown_to_rich_html(text)
+        self.assertIn("<ul>", html)
+        self.assertIn("<li>Пункт 1", html)
+        self.assertIn("<li>Пункт 2", html)
+        self.assertIn("<li>Пункт 3", html)
+        self.assertIn("</ul>", html)
+
+    def test_nested_lists(self):
+        """Вложенные списки с отступами корректно иерархически оборачиваются."""
+        text = (
+            "- Кинематика\n"
+            "  - Равномерное движение\n"
+            "  - Равноускоренное движение\n"
+            "- Динамика\n"
+            "  - Законы Ньютона"
+        )
+        html = markdown_to_rich_html(text)
+        self.assertIn("<ul>", html)
+        self.assertIn("<li>Кинематика", html)
+        self.assertIn("<li>Равномерное движение", html)
+        self.assertIn("<li>Равноускоренное движение", html)
+        self.assertIn("<li>Динамика", html)
+        self.assertIn("<li>Законы Ньютона", html)
+
+    def test_headings(self):
+        """Заголовки #, ##, ### преобразуются в h1, h2, h3."""
+        text = "# Заголовок 1\n\n## Заголовок 2\n\n### Заголовок 3"
+        html = markdown_to_rich_html(text)
+        self.assertIn("<h1>Заголовок 1</h1>", html)
+        self.assertIn("<h2>Заголовок 2</h2>", html)
+        self.assertIn("<h3>Заголовок 3</h3>", html)
+
+    def test_single_and_double_newlines(self):
+        """Двойной перенос создает отдельные <p>, одиночный создает <br> внутри <p>."""
+        text = (
+            "Первый абзац, первая строка.\n"
+            "Первый абзац, вторая строка.\n\n"
+            "Второй абзац."
+        )
+        html = markdown_to_rich_html(text)
+        self.assertIn("<p>Первый абзац, первая строка.<br>Первый абзац, вторая строка.</p>", html)
+        self.assertIn("<p>Второй абзац.</p>", html)
+
+    def test_bold_inside_list_item(self):
+        """Жирный шрифт выделяет только термин внутри пункта списка, не протекая дальше."""
+        text = (
+            "- **Закон Ома** — сила тока пропорциональна напряжению.\n"
+            "- **Закон Джоуля-Ленца** — количество теплоты."
+        )
+        html = markdown_to_rich_html(text)
+        self.assertIn("<li><b>Закон Ома</b> — сила тока пропорциональна напряжению.</li>", html)
+        self.assertIn("<li><b>Закон Джоуля-Ленца</b> — количество теплоты.</li>", html)
+        # Проверяем, что нет незакрытых <b>
+        self.assertEqual(html.count("<b>"), html.count("</b>"))
+
+    def test_formula_inside_list_item(self):
+        """Формула внутри пункта списка корректно преобразуется в <tg-math>."""
+        text = (
+            "- **Второй закон Ньютона**: $F = ma$ — основное уравнение динамики.\n"
+            "- **Импульс**: $p = mv$."
+        )
+        html = markdown_to_rich_html(text)
+        self.assertIn("<b>Второй закон Ньютона</b>: <tg-math>F = ma</tg-math> — основное уравнение динамики.", html)
+        self.assertIn("<b>Импульс</b>: <tg-math>p = mv</tg-math>.", html)
+
+    def test_squished_bullets_auto_split(self):
+        """Строка со слипшимися через «•» пунктами автоматически разбивается на элементы списка."""
+        text = "Кинематика: • **Скорость**: $v = at$ • **Перемещение**: $s = vt$"
+        html = markdown_to_rich_html(text)
+        self.assertIn("<p>Кинематика:</p>", html)
+        self.assertIn("<ul>", html)
+        self.assertIn("<b>Скорость</b>: <tg-math>v = at</tg-math>", html)
+        self.assertIn("<b>Перемещение</b>: <tg-math>s = vt</tg-math>", html)
+        self.assertNotIn("•", html)
+
 
 if __name__ == "__main__":
     unittest.main()

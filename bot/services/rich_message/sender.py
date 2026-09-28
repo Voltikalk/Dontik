@@ -64,7 +64,9 @@ async def send_rich_response(
         except Exception:
             pass
 
+    logger.info(f"=== RAW LLM ANSWER (chat_id={chat_id}, length={len(raw_markdown)}) ===\n{raw_markdown}")
     rich_html = markdown_to_rich_html(raw_markdown)
+    logger.info(f"=== GENERATED RICH HTML (chat_id={chat_id}, length={len(rich_html)}) ===\n{rich_html}")
     chunks = split_rich_message(rich_html, max_limit=32000)
 
     sent_messages: List[Message] = []

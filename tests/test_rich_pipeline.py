@@ -121,6 +121,47 @@ class TestRichPipeline(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("<tg-math-block>", html_payload)
         self.assertIn("<blockquote><b>", html_payload)
 
+    async def test_physics_conspectus_pipeline(self):
+        """Проверка структуры аккуратного конспекта (формулы физики 10 класса)."""
+        physics_markdown = (
+            "# Формулы физики 10 класса\n\n"
+            "Краткий справочник основных законов механики и электродинамики.\n\n"
+            "## Кинематика\n"
+            "Кинематика изучает движение тел без учета причин:\n"
+            "- **Мгновенная скорость** — скорость тела при равноускоренном движении:\n"
+            "$$v = v_0 + at$$\n"
+            "- **Перемещение**:\n"
+            "$$s = v_0 t + \\frac{at^2}{2}$$\n\n"
+            "## Динамика\n"
+            "- **Второй закон Ньютона**:\n"
+            "$$F = ma$$\n"
+            "- **Закон Гука**: $F = -kx$\n\n"
+            "🔗 **Источники:** [Википедия](https://ru.wikipedia.org) • [ФизМат](https://fizmat.ru)"
+        )
+        rich_html = markdown_to_rich_html(physics_markdown)
+
+        # 1. Заголовки разделов
+        self.assertIn("<h1>Формулы физики 10 класса</h1>", rich_html)
+        self.assertIn("<h2>Кинематика</h2>", rich_html)
+        self.assertIn("<h2>Динамика</h2>", rich_html)
+
+        # 2. Абзацы
+        self.assertIn("<p>Краткий справочник основных законов механики и электродинамики.</p>", rich_html)
+
+        # 3. Списки
+        self.assertIn("<ul>", rich_html)
+        self.assertIn("<li><b>Мгновенная скорость</b> — скорость тела при равноускоренном движении:</li>", rich_html)
+        self.assertIn("<li><b>Второй закон Ньютона</b>:</li>", rich_html)
+
+        # 4. Формулы
+        self.assertIn("<tg-math-block>v = v_0 + at</tg-math-block>", rich_html)
+        self.assertIn("<tg-math-block>s = v_0 t + \\frac{at^2}{2}</tg-math-block>", rich_html)
+        self.assertIn("<tg-math-block>F = ma</tg-math-block>", rich_html)
+        self.assertIn("<tg-math>F = -kx</tg-math>", rich_html)
+
+        # 5. Источники
+        self.assertIn('<p>🔗 <b>Источники:</b> <a href="https://ru.wikipedia.org">Википедия</a> • <a href="https://fizmat.ru">ФизМат</a></p>', rich_html)
+
 
 if __name__ == "__main__":
     unittest.main()
