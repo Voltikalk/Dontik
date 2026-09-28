@@ -917,15 +917,30 @@ def split_telegram_chunks(text: str, max_chunk_size: int = 3800) -> list[str]:
 async def send_formatted_message(message: Message, text: str, reply_markup=None):
     """
     Отправляет пользователю сообщение с красивой разметкой и формулами.
-    - Разбивает исходный текст на части с сохранением структуры строк и абзацев ДО конвертации в HTML.
-    - Форматирует математические выражения в элегантный, легко читаемый Unicode HTML.
-    - При возникновении ошибки парсинга Telegram HTML безопасно отправляет plain text без потери содержимого.
+    - Разбирает ответ на текст и формулы, формулы рендерит в PNG.
+    - При возникновении ошибки безопасно отправляет plain text без потери содержимого.
     - Отключает предпросмотр веб-ссылок.
     """
     if not text:
         return
 
-    # Разбиваем исходный текст с запасом по размеру (3200 символов), чтобы после HTML-тегов не превысить 4096
+    try:
+        from bot.services.message_splitter import parse_response_segments
+        from bot.services.math_render import send_rendered_segments
+        segments = parse_response_segments(text)
+        if segments:
+            await send_rendered_segments(
+                bot=message.bot,
+                chat_id=message.chat.id,
+                segments=segments,
+                reply_to_message_id=message.message_id,
+                reply_markup=reply_markup
+            )
+            return
+    except Exception as e:
+        logger.warning(f"Ошибка при отправке сегментированного сообщения: {e}. Фолбэк на стандартную отправку...")
+
+    # Резервная отправка (если парсер сегментов не вернул элементов)
     raw_chunks = split_telegram_chunks(text, max_chunk_size=3200)
 
     for i, raw_chunk in enumerate(raw_chunks):

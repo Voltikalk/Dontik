@@ -28,3 +28,7 @@ data/*.db
 # IDE settings
 .idea/
 *.swp
+
+# Node dependencies and math render cache
+node_modules/
+data/cache/

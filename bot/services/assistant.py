@@ -16,6 +16,8 @@ from bot.services.formatters import (
     convert_rich_tags_to_unicode,
     fix_squished_bullets
 )
+from bot.services.message_splitter import parse_response_segments
+from bot.services.math_render import send_rendered_segments
 
 logger = logging.getLogger(__name__)
 
@@ -53,17 +55,15 @@ ASSISTANT_SYSTEM_PROMPT = """Ты — универсальный персона�
      🔗 **Источники:** [Википедия](URL) • [Название](URL)
 
 5. ПРАВИЛА ВЫВОДА МАТЕМАТИКИ И ФОРМУЛ:
-   - Для формул и математических вычислений используй стандартную математическую запись:
-     • Ключевые уравнения, формулы и шаги решения выделяй отдельными блоками: $$ ... $$ или цитатой (> **формула**), чтобы они красиво выделялись в Telegram.
-     • Внутри текста используй $...$ или понятные Unicode-символы: ⁰, ¹, ², ³, ⁴, ⁿ, ˣ, ⁻¹, ₀, ₁, ₂, ₙ, √, ±, ≈, ≠, ≤, ≥, ·, ÷, −, π, ∫, ∑, ∞, tg, sin, cos, ln.
-     • Дроби пиши в виде a / b или \\frac{a}{b}.
-     • Степени пиши через фигурные скобки e^{x^2} или Unicode x².
-   - Каждый математический пример в списке пиши строго с НОВОЙ СТРОКИ:
-     • $\\int x e^{x^2} dx$ — подстановка $u = x^2$
-     • $\\int \\frac{\\sin x}{x} dx$ — специальная функция $\\text{Si}(x)$
-     • $\\int \\frac{dx}{(x^2+1)^2}$ — тригонометрическая подстановка $x = \\text{tg}\\,\\theta$
-   - ИТОГОВЫЙ ответ или главную формулу при пошаговом решении выделяй через \\boxed{...} или отдельным блоком:
-     > **I = π⁴ / 15**
+   - Все формулы и математические выражения ОБЯЗАТЕЛЬНО пиши в стандартном LaTeX.
+   - Блочные формулы (отдельной строкой, ключевые уравнения, выкладки, итоговые формулы) строго выделяй в $$...$$ (или \\[...\\]).
+   - Короткие математические символы и формулы внутри строки пиши в $...$.
+   - Весь остальной текст оформляй в стандартном Markdown (жирный **...**, курсив *...*, заголовки #, аккуратные списки).
+   - КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать экзотические LaTeX-окружения, которые KaTeX не поддерживает. Используй надежные стандартные: aligned, matrix, pmatrix, bmatrix, cases, \\frac{...}{...}, \\sqrt{...}, \\int, \\sum, \\prod, \\lim, \\boxed{...}.
+   - Каждый пункт со сложной формулой пиши строго с новой строки:
+     • $$\\int x e^{x^2} dx = \\frac{1}{2} e^{x^2} + C$$ — подстановка $u = x^2$
+     • $$\\int \\frac{\\sin x}{x} dx = \\text{Si}(x) + C$$ — интегральный синус
+     • $$\\int \\frac{dx}{(x^2+1)^2} = \\frac{x}{2(x^2+1)} + \\frac{1}{2} \\text{arctg}\\,x + C$$
 """
 
 
@@ -240,6 +240,7 @@ def clean_for_preview(text: str) -> str:
     s = s.replace(r'\int', '∫').replace(r'\sum', '∑').replace(r'\infty', '∞')
     s = re.sub(r'\\(?:sin|cos|tan|ln|log|exp|sqrt|pi)\b', lambda m: m.group(0)[1:], s)
     s = re.sub(r'\\frac\{([^}]+)\}\{([^}]+)\}', r'\1/\2', s)
+    s = s.replace('$$', ' ').replace('$', '')
     s = re.sub(r'[{}]', '', s)
     return s.strip()
 
@@ -327,38 +328,24 @@ async def stream_assistant_response(
             except Exception:
                 pass
 
-    final_html = md_to_telegram_html(full_text)
-    is_long = len(final_html) > 3800
-
-    if is_long:
-        # Для слишком длинных сообщений (>3800 символов) удаляем статус и отправляем частями
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-        await send_formatted_message(message, full_text)
+    segments = parse_response_segments(full_text)
+    if segments:
+        await send_rendered_segments(
+            bot=message.bot,
+            chat_id=message.chat.id,
+            segments=segments,
+            reply_to_message_id=message.message_id,
+            status_msg=status_msg
+        )
     else:
-        # Редактируем сообщение НА МЕСТЕ без лишних удалений и мигания
+        final_html = md_to_telegram_html(full_text)
         try:
             await status_msg.edit_text(
                 final_html,
                 parse_mode=ParseMode.HTML,
                 link_preview_options=LinkPreviewOptions(is_disabled=True)
             )
-        except Exception as e:
-            logger.warning(f"Ошибка edit_text с HTML: {e}. Переключаемся на plain text...")
-            try:
-                plain_txt = re.sub(r'</?[^>]+>', '', final_html)
-                await status_msg.edit_text(
-                    plain_txt,
-                    parse_mode=None,
-                    link_preview_options=LinkPreviewOptions(is_disabled=True)
-                )
-            except Exception:
-                try:
-                    await status_msg.delete()
-                except Exception:
-                    pass
-                await send_formatted_message(message, full_text)
+        except Exception:
+            await send_formatted_message(message, full_text)
 
     return full_text
