@@ -1,5 +1,5 @@
 import unittest
-from bot.services.rich_message.converter import markdown_to_rich_html, is_likely_math
+from bot.services.rich_message.converter import markdown_to_rich_html
 
 
 class TestRichConverter(unittest.TestCase):

@@ -1,7 +1,8 @@
-import os
 from pathlib import Path
 from typing import AsyncGenerator
 from contextlib import asynccontextmanager
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     AsyncEngine,
@@ -11,6 +12,7 @@ from sqlalchemy.ext.asyncio import (
 
 from bot.config import settings
 from bot.database.models import Base
+from bot.database.migrations import run_migrations
 
 # Гарантируем существование директории data/ для SQLite
 db_path = settings.DATABASE_URL.replace("sqlite+aiosqlite:///", "")
@@ -26,6 +28,25 @@ engine: AsyncEngine = create_async_engine(
     connect_args={"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {}
 )
 
+def _unicode_lower(value):
+    """Юникод-версия lower()."""
+    return value.lower() if isinstance(value, str) else value
+
+
+@event.listens_for(Engine, "connect")
+def _register_sqlite_unicode(dbapi_connection, connection_record) -> None:
+    """
+    Встроенная lower() в SQLite работает только с ASCII, поэтому «Компрессор»
+    и «компрессор» считались разными предметами и обновление места хранения
+    не срабатывало. Регистрируем Юникод-версию для всех SQLite-соединений.
+    """
+    if not hasattr(dbapi_connection, "create_function"):
+        return  # не SQLite — не трогаем
+    try:
+        dbapi_connection.create_function("lower", 1, _unicode_lower)
+    except Exception:  # noqa: BLE001 - не критично
+        pass
+
 # Фабрика асинхронных сессий
 async_session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
     bind=engine,
@@ -35,12 +56,16 @@ async_session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
 
 
 async def init_db() -> None:
-    """Инициализация базы данных: создание всех таблиц при старте бота."""
+    """Инициализация базы данных: создание всех таблиц и применение миграций при старте бота."""
     async with engine.begin() as conn:
         # Включаем поддержку внешних ключей для SQLite
         if "sqlite" in settings.DATABASE_URL:
             await conn.exec_driver_sql("PRAGMA foreign_keys = ON;")
+            # WAL заметно ускоряет запись и не блокирует чтение при параллельных сессиях
+            await conn.exec_driver_sql("PRAGMA journal_mode = WAL;")
         await conn.run_sync(Base.metadata.create_all)
+
+    await run_migrations(engine)
 
 
 @asynccontextmanager

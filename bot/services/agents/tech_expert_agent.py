@@ -1,8 +1,6 @@
 import logging
 from typing import Optional, Dict, Any
-from openai import AsyncOpenAI
 
-from bot.config import settings
 from .base_agent import BaseAgent, AgentResult
 from .llm_helper import call_subagent_llm
 

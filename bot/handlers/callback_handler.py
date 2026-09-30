@@ -1,152 +1,165 @@
-import re
-import logging
-from aiogram import Router, F, html
-from aiogram.enums import ParseMode
-from aiogram.types import CallbackQuery, Message
-from aiogram.fsm.context import FSMContext
+"""
+Обработка всех inline-кнопок: меню, карточки подтверждения, правка полей, задачи.
+"""
 
-from bot.database.db import get_session
+import logging
+import re
+
+from aiogram import Router, html
+from aiogram.enums import ParseMode
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, Message
+
 from bot.database import crud
-from bot.services.draft_store import pop_draft
-from bot.keyboards.inline import get_tasks_keyboard
-from bot.emojis import (
-    E_CHECK,
-    E_CROSS,
-    E_LIST,
-    E_PARTY
+from bot.database.db import get_session
+from bot.emojis import E_ALERT, E_CHECK, E_CROSS, E_LIST, E_PIN, E_SEARCH, E_WRENCH
+from bot.handlers.input_handler import send_tasks_list
+from bot.handlers.states import EditEntryState, FindItemState
+from bot.keyboards.inline import (
+    ActionCallback,
+    EditFieldCallback,
+    EntryCallback,
+    TaskCallback,
+    get_edit_field_keyboard,
+    get_main_menu_keyboard,
+    get_undo_task_keyboard,
+)
+from bot.services import draft_store
+from bot.services.dates import resolve_due
+from bot.services.formatters import (
+    format_all_items_list,
+    format_confirmed,
+    format_fuel_history,
+    format_search_prompt,
+    format_service_history,
+    format_stats_summary,
+    fmt_money,
 )
 
 logger = logging.getLogger(__name__)
 
 router = Router(name="callback_handler_router")
 
+# Поля карточки, в которые можно попасть кнопкой «Поправить».
+_FIELD_LABELS = {
+    "liters": "Литры",
+    "cost": "Стоимость",
+    "odometer": "Пробег",
+    "station": "АЗС",
+    "title": "Название",
+    "location": "Место хранения",
+    "due_date": "Срок",
+    "item_name": "Предмет",
+}
+_NUMERIC_FIELDS = {"liters", "cost", "odometer"}
+
+
+# --- Резервный разбор карточки из текста сообщения ---
+
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _clean(value: str) -> str:
+    """Убирает HTML-теги и эмодзи-теги, приводит к чистому тексту."""
+    return _TAG_RE.sub("", value or "").replace("", "").strip()
+
 
 def parse_card_text(text: str) -> tuple[str | None, dict]:
     """
-    Резервный парсинг данных прямо из текста карточки в Telegram.
-    Используется, если FSM или временное хранилище было очищено/перезапущено.
+    Аварийный разбор данных прямо из текста карточки в Telegram.
+
+    Нужен, когда черновик потерялся (перезапуск бота). Работает с тем HTML,
+    который реально отправляет бот: «• <b>Литры:</b> <code>42.5 л</code>».
     """
     if not text:
         return None, {}
 
-    # 1. Задача
-    if "Новая задача" in text or "список дел" in text or "Дело:" in text:
-        title_m = re.search(r'Дело:\*?\s*([^\n\*_]+)', text)
-        due_m = re.search(r'Срок:\*?\s*([^\n\*_]+)', text)
-        title = title_m.group(1).strip() if title_m else "Задача"
-        due_date = due_m.group(1).strip() if due_m else None
-        return "task_save", {"title": title, "due_date": due_date}
+    plain = _clean(text)
+    lowered = plain.lower()
 
-    # 2. Заправка
-    if "заправка" in text.lower() or "Литры:" in text:
-        liters_m = re.search(r'Литры:\*?\s*([0-9.,]+)', text)
-        cost_m = re.search(r'Сумма:\*?\s*([0-9\s.,]+)', text)
-        odo_m = re.search(r'Пробег:\*?\s*([0-9\s.,]+)', text)
-        st_m = re.search(r'АЗС:\*?\s*([^\n\*_]+)', text)
+    def grab(label: str) -> str | None:
+        # «Литры: 42.5 л» -> «42.5 л»
+        match = re.search(rf"{label}\s*:\s*(.+)", plain)
+        return match.group(1).strip() if match else None
 
-        liters = float(liters_m.group(1).replace(",", ".")) if liters_m else 0.0
-        cost_str = cost_m.group(1).replace(" ", "").replace("₽", "").replace(",", ".") if cost_m else "0"
-        cost = float(cost_str) if cost_str else 0.0
-        odo_str = odo_m.group(1).replace(" ", "").replace("км", "") if odo_m else "0"
-        odo = int(odo_str) if odo_str.isdigit() else 0
-        station = st_m.group(1).strip() if st_m and "не указана" not in st_m.group(1) else None
-        return "fuel", {"liters": liters, "cost": cost, "odometer": odo, "station": station}
+    def grab_num(label: str) -> float | None:
+        raw = grab(label)
+        if not raw:
+            return None
+        match = re.search(r"-?\d[\d\s]*(?:[.,]\d+)?", raw)
+        if not match:
+            return None
+        cleaned = match.group(0).replace(" ", "").replace(",", ".")
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
 
-    # 3. Сервис / ремонт
-    if "обслуживание" in text.lower() or "ремонт" in text.lower() or "Работы:" in text:
-        title_m = re.search(r'Работы:\*?\s*([^\n\*_]+)', text)
-        odo_m = re.search(r'Пробег:\*?\s*([0-9\s.,]+)', text)
-        cost_m = re.search(r'Стоимость:\*?\s*([0-9\s.,]+)', text)
-        notes_m = re.search(r'Заметки:\*?\s*([^\n\*_]+)', text)
+    if "новая задача" in lowered or "дело:" in lowered:
+        return "task_save", {"title": grab("Дело"), "due_date": grab("Срок")}
 
-        title = title_m.group(1).strip() if title_m else "Техническое обслуживание"
-        odo_str = odo_m.group(1).replace(" ", "").replace("км", "") if odo_m else "0"
-        odo = int(odo_str) if odo_str.isdigit() else 0
-        cost = float(cost_m.group(1).replace(" ", "").replace("₽", "").replace(",", ".")) if cost_m and "не указано" not in cost_m.group(1) else None
-        notes = notes_m.group(1).strip() if notes_m else None
-        return "service", {"title": title, "odometer": odo, "cost": cost, "notes": notes}
+    if "заправка" in lowered or "литры:" in lowered:
+        station = grab("АЗС")
+        return "fuel", {
+            "liters": grab_num("Литры"),
+            "cost": grab_num("Сумма"),
+            "odometer": int(grab_num("Пробег") or 0),
+            "station": None if not station or "не указан" in station.lower() else station,
+        }
 
-    # 4. Вещь
-    if "местоположение" in text.lower() or "Предмет:" in text:
-        item_m = re.search(r'Предмет:\*?\s*([^\n\*_]+)', text)
-        loc_m = re.search(r'Где лежит:\*?\s*([^\n\*_]+)', text)
-        item_name = item_m.group(1).strip() if item_m else "Вещь"
-        location = loc_m.group(1).strip() if loc_m else "Гараж"
-        return "item_save", {"item_name": item_name, "location": location}
+    if "обслуживание" in lowered or "ремонт" in lowered or "работа:" in lowered:
+        cost = grab_num("Стоимость")
+        return "service", {
+            "title": grab("Работа"),
+            "cost": cost,
+            "odometer": int(grab_num("Пробег") or 0),
+            "notes": grab("Заметки"),
+        }
+
+    if "местоположение" in lowered or "предмет:" in lowered:
+        return "item_save", {"item_name": grab("Предмет"), "location": grab("Где лежит")}
 
     return None, {}
 
 
-@router.callback_query(F.data.startswith("confirm_entry"))
-async def process_confirm_entry(callback: CallbackQuery, state: FSMContext):
-    """
-    Подтверждение и сохранение записи в SQLite с многоуровневым поиском данных:
-    1. По draft_id из callback_data.
-    2. Из FSMContext.
-    3. Резервный парсинг прямо из текста сообщения карточки.
-    """
-    if not callback.message or not isinstance(callback.message, Message):
-        await callback.answer()
-        return
+async def _resolve_draft(callback: CallbackQuery, draft_id: str) -> tuple[str | None, dict]:
+    """Ищет данные карточки: черновик -> FSM -> текст сообщения."""
+    # 1. Черновик (основной путь)
+    draft = draft_store.get_draft(draft_id) if draft_id else None
+    if draft:
+        return draft.get("intent"), dict(draft.get("data") or {})
+
+    # 2. Текст самой карточки (пережил перезапуск бота)
+    if callback.message:
+        text = callback.message.text or callback.message.caption or ""
+        intent, data = parse_card_text(text)
+        if intent:
+            logger.info("Восстановил карточку из текста: intent=%s", intent)
+            return intent, data
+
+    return None, {}
+
+
+async def _save_entry(callback: CallbackQuery, state: FSMContext, draft_id: str) -> str:
+    """Сохраняет запись в БД и возвращает текст подтверждения."""
+    intent, data = await _resolve_draft(callback, draft_id)
+    if not intent:
+        return ""
 
     user_id = callback.from_user.id
-    draft_id = callback.data.split(":", 1)[1] if ":" in callback.data else None
-
-    intent = None
-    data = {}
-
-    # Уровень 1: Проверяем хранилище черновиков по draft_id
-    if draft_id:
-        draft = pop_draft(draft_id)
-        if draft:
-            intent = draft.get("intent")
-            data = draft.get("data", {})
-
-    # Уровень 2: Проверяем FSM
-    if not intent or not data:
-        state_data = await state.get_data()
-        if state_data.get("intent"):
-            intent = state_data.get("intent")
-            data = state_data.get("payload") or state_data.get("data") or {}
-            if not data:
-                data = {
-                    k: v for k, v in state_data.items()
-                    if k not in ("intent", "transcript", "payload", "draft_id")
-                }
-
-    # Уровень 3: Резервный разбор текста сообщения карточки
-    if not intent or not data:
-        card_text = callback.message.text or callback.message.caption or ""
-        parsed_intent, parsed_data = parse_card_text(card_text)
-        if parsed_intent and parsed_data:
-            intent = parsed_intent
-            data = parsed_data
-
-    # Если все уровни не дали результата
-    if not intent or not data:
-        await callback.answer("Срок действия карточки истек или данные уже сохранены.", show_alert=True)
-        try:
-            await callback.message.edit_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-        await state.clear()
-        return
-
-    result_text = f"{E_CHECK} <b>Записано в базу!</b>"
+    consumption = None
 
     async with get_session() as session:
         if intent == "fuel":
             liters = float(data.get("liters") or 0.0)
             cost = float(data.get("cost") or 0.0)
             odometer = int(data.get("odometer") or 0)
-            station = data.get("station")
 
-            # Проверяем предыдущую запись заправки для расчета расхода
-            prev_log = await crud.get_last_fuel_log(session, user_id=user_id)
-            if prev_log and prev_log.odometer and odometer > prev_log.odometer and liters > 0:
-                distance = odometer - prev_log.odometer
-                consumption = (liters / distance) * 100
-                result_text = f"{E_CHECK} <b>Записано в базу!</b>\nРасход: <code>{consumption:.1f} л / 100 км</code>"
+            prev = await crud.get_last_fuel_log(session, user_id=user_id)
+            if prev and prev.odometer and odometer > prev.odometer:
+                distance = odometer - prev.odometer
+                if liters > 0 and 0 < distance <= 3000:
+                    consumption = round(liters / distance * 100, 1)
 
             await crud.add_fuel_log(
                 session=session,
@@ -154,114 +167,281 @@ async def process_confirm_entry(callback: CallbackQuery, state: FSMContext):
                 liters=liters,
                 cost=cost,
                 odometer=odometer,
-                station_name=station
+                station_name=data.get("station"),
             )
 
         elif intent == "service":
-            odometer = int(data.get("odometer") or 0)
-            title = str(data.get("title") or "Техническое обслуживание")
-            cost = float(data["cost"]) if data.get("cost") is not None else None
-            notes = data.get("notes")
-
+            cost = data.get("cost")
             await crud.add_service_log(
                 session=session,
                 user_id=user_id,
-                odometer=odometer,
-                title=title,
-                cost=cost,
-                notes=notes
+                odometer=int(data.get("odometer") or 0),
+                title=str(data.get("title") or "Техническое обслуживание"),
+                cost=float(cost) if cost is not None else None,
+                notes=data.get("notes"),
             )
 
         elif intent == "item_save":
-            item_name = str(data.get("item_name") or "Вещь")
-            location = str(data.get("location") or "Гараж")
-
             await crud.upsert_item_location(
                 session=session,
                 user_id=user_id,
-                item_name=item_name,
-                location=location
+                item_name=str(data.get("item_name") or "Вещь"),
+                location=str(data.get("location") or "Гараж"),
             )
 
         elif intent == "task_save":
-            title = str(data.get("title") or "Задача")
-            due_date = data.get("due_date")
-
+            raw_due = data.get("due_date")
             await crud.add_task(
                 session=session,
                 user_id=user_id,
-                title=title,
-                due_date=due_date
+                title=str(data.get("title") or "Задача"),
+                due_date=str(raw_due) if raw_due else None,
+                due_at=resolve_due(data.get("due_at"), str(raw_due) if raw_due else None),
             )
-            due_str = f" <i>(срок: {html.quote(due_date)})</i>" if due_date else ""
-            result_text = f"{E_CHECK} Задача «<b>{html.quote(title)}</b>»{due_str} записана в список дел!"
 
-    # Очищаем FSM состояние
-    await state.clear()
-
-    # Редактируем сообщение с карточкой
-    try:
-        await callback.message.edit_text(result_text, reply_markup=None, parse_mode=ParseMode.HTML)
-    except Exception:
-        pass
-    await callback.answer("✅ Успешно сохранено!")
+    draft_store.pop_draft(draft_id)
+    return format_confirmed(intent, data, consumption)
 
 
-@router.callback_query(F.data.startswith("cancel_entry"))
-async def process_cancel_entry(callback: CallbackQuery, state: FSMContext):
-    """
-    Отмена внесения записи.
-    Очищает черновик и FSM, меняет текст на '❌ Запись отменена'.
-    """
+# --- Карточка: сохранить / отмена / поправить ---
+
+@router.callback_query(EntryCallback.filter())
+async def handle_entry(callback: CallbackQuery, callback_data: EntryCallback, state: FSMContext):
+    action = callback_data.action
+    draft_id = callback_data.draft_id
+
     if not callback.message or not isinstance(callback.message, Message):
         await callback.answer()
         return
 
-    draft_id = callback.data.split(":", 1)[1] if ":" in callback.data else None
-    if draft_id:
-        pop_draft(draft_id)
+    if action == "cancel":
+        draft_store.pop_draft(draft_id)
+        await state.clear()
+        await callback.answer("Отменено")
+        await _safe_edit(callback.message, f"{E_CROSS} <b>Отменено</b>", reply_markup=None)
+        return
+
+    if action == "edit":
+        draft = draft_store.get_draft(draft_id)
+        if not draft:
+            await callback.answer("Карточка устарела — скажи это ещё раз", show_alert=True)
+            await _safe_edit(callback.message, f"{E_ALERT} Карточка устарела. Скажи это ещё раз — сделаю новую.", reply_markup=None)
+            return
+
+        await state.set_state(EditEntryState.waiting_field)
+        await state.update_data(draft_id=draft_id, intent=draft.get("intent"), editing_field="")
+        await callback.answer()
+        await callback.message.answer(
+            f"{E_PIN} <b>Что поправить?</b>\n\nНажми поле, потом пришли новое значение текстом.",
+            reply_markup=get_edit_field_keyboard(draft.get("intent", ""), draft_id),
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    # action == "save"
+    result_text = await _save_entry(callback, state, draft_id)
+    if not result_text:
+        await callback.answer("Карточка устарела или уже сохранена", show_alert=True)
+        await _safe_edit(callback.message, f"{E_ALERT} Карточка уже неактуальна.", reply_markup=None)
+        return
 
     await state.clear()
-    try:
-        await callback.message.edit_text(f"{E_CROSS} <b>Запись отменена</b>", reply_markup=None, parse_mode=ParseMode.HTML)
-    except Exception:
-        pass
-    await callback.answer("Отменено")
+    await callback.answer("Записано")
+    await _safe_edit(callback.message, result_text, reply_markup=None)
 
 
-@router.callback_query(F.data.startswith("done_task:"))
-async def process_done_task(callback: CallbackQuery):
-    """Отмечает задачу как выполненную прямо по нажатию кнопки в списке задач."""
-    if not callback.message or not isinstance(callback.message, Message):
-        await callback.answer()
-        return
+@router.callback_query(EditFieldCallback.filter())
+async def handle_edit_field_pick(callback: CallbackQuery, callback_data: EditFieldCallback, state: FSMContext):
+    """Пользователь выбрал, какое поле карточки хочет исправить."""
+    field = callback_data.field
+    label = _FIELD_LABELS.get(field, field)
 
-    task_id_str = callback.data.split(":", 1)[1]
-    if not task_id_str.isdigit():
-        await callback.answer()
-        return
+    await state.set_state(EditEntryState.waiting_field)
+    await state.update_data(draft_id=callback_data.draft_id, editing_field=field)
 
-    task_id = int(task_id_str)
+    hint = " (только число)" if field in _NUMERIC_FIELDS else ""
+    await callback.answer()
+    await callback.message.answer(
+        f"{E_PIN} Пришли новое значение для <b>{html.quote(label)}</b>{hint}.\n"
+        f"Пример: <i>2500</i>",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+# --- Задачи ---
+
+@router.callback_query(TaskCallback.filter())
+async def handle_task(callback: CallbackQuery, callback_data: TaskCallback):
+    action = callback_data.action
     user_id = callback.from_user.id
 
-    async with get_session() as session:
-        success = await crud.complete_task(session, user_id=user_id, task_id=task_id)
-        if success:
-            tasks = await crud.get_active_tasks(session, user_id=user_id)
-            if tasks:
-                lines = [f"{E_LIST} <b>Твой актуальный список дел и задач:</b>\n"]
-                for idx, t in enumerate(tasks, 1):
-                    due_str = f" <i>(срок: {html.quote(t.due_date)})</i>" if t.due_date else ""
-                    lines.append(f"{idx}. <b>{html.quote(t.title)}</b>{due_str}")
-                kb = get_tasks_keyboard(tasks)
-                await callback.message.edit_text("\n".join(lines), reply_markup=kb, parse_mode=ParseMode.HTML)
-            else:
-                await callback.message.edit_text(
-                    f"{E_PARTY} <b>Все задачи выполнены! Отличная работа.</b>",
-                    reply_markup=None,
-                    parse_mode=ParseMode.HTML
-                )
-            await callback.answer("✅ Задача выполнена!")
-        else:
-            await callback.answer("Задача уже была отмечена или удалена.", show_alert=True)
+    if not callback.message or not isinstance(callback.message, Message):
+        await callback.answer()
+        return
 
+    if action == "done_all":
+        async with get_session() as session:
+            closed = await crud.complete_all_tasks(session, user_id=user_id)
+        await callback.answer(f"Закрыто задач: {closed}")
+        await callback.message.answer(
+            f"{E_CHECK} <b>Все задачи закрыты</b> — отмечено {closed}.\n"
+            f"Открывай новые дела командой /tasks.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if not callback_data.task_id.isdigit():
+        await callback.answer()
+        return
+
+    task_id = int(callback_data.task_id)
+
+    if action == "undo":
+        async with get_session() as session:
+            ok = await crud.uncomplete_task(session, user_id=user_id, task_id=task_id)
+        await callback.answer("Вернул в список" if ok else "Задача и так активна", show_alert=not ok)
+        if ok:
+            await send_tasks_list(callback.message, user_id)
+        return
+
+    # action == "done"
+    async with get_session() as session:
+        ok = await crud.complete_task(session, user_id=user_id, task_id=task_id)
+        title = None
+        if ok:
+            task = await crud.get_task(session, user_id=user_id, task_id=task_id)
+            title = task.title if task else None
+
+    if not ok:
+        await callback.answer("Уже выполнено", show_alert=True)
+        return
+
+    await callback.answer("Готово")
+
+    await send_tasks_list(callback.message, user_id, edit=True)
+    if title:
+        await callback.message.answer(
+            f"{E_CHECK} Закрыто: <b>{html.quote(title)}</b>",
+            reply_markup=get_undo_task_keyboard(task_id),
+            parse_mode=ParseMode.HTML,
+        )
+
+
+# --- Главное меню ---
+
+@router.callback_query(ActionCallback.filter())
+async def handle_action(callback: CallbackQuery, callback_data: ActionCallback, state: FSMContext):
+    action = callback_data.action
+    user_id = callback.from_user.id
+
+    if not callback.message or not isinstance(callback.message, Message):
+        await callback.answer()
+        return
+
+    if action == "tasks":
+        await callback.answer()
+        await send_tasks_list(callback.message, user_id)
+
+    elif action == "summary_stats":
+        async with get_session() as session:
+            fuel = await crud.get_fuel_stats(session, user_id=user_id)
+            service = await crud.get_service_stats(session, user_id=user_id)
+            consumption = await crud.get_avg_consumption(session, user_id=user_id)
+        fuel["avg_consumption"] = consumption or 0.0
+
+        fuel_block = format_stats_summary(fuel)
+        service_block = (
+            f"{E_WRENCH} <b>Сервис и ремонты</b>\n"
+            f"• Записей: <code>{service['count']}</code>\n"
+            f"• Потрачено: <code>{fmt_money(service['total_cost'])}</code>"
+        )
+        await callback.answer()
+        await callback.message.answer(
+            f"{fuel_block}\n\n{service_block}",
+            reply_markup=get_main_menu_keyboard(),
+            parse_mode=ParseMode.HTML,
+        )
+
+    elif action == "history_fuel":
+        async with get_session() as session:
+            logs = await crud.get_recent_fuel_logs(session, user_id=user_id, limit=10)
+        await callback.answer()
+        await callback.message.answer(
+            format_fuel_history(logs),
+            reply_markup=get_main_menu_keyboard(),
+            parse_mode=ParseMode.HTML,
+        )
+
+    elif action == "history_service":
+        async with get_session() as session:
+            logs = await crud.get_recent_service_logs(session, user_id=user_id, limit=10)
+        await callback.answer()
+        await callback.message.answer(
+            format_service_history(logs),
+            reply_markup=get_main_menu_keyboard(),
+            parse_mode=ParseMode.HTML,
+        )
+
+    elif action == "list_items":
+        async with get_session() as session:
+            items = await crud.list_all_items(session, user_id=user_id)
+        await callback.answer()
+        await callback.message.answer(
+            format_all_items_list(items),
+            reply_markup=get_main_menu_keyboard(),
+            parse_mode=ParseMode.HTML,
+        )
+
+    elif action == "find_item":
+        await state.set_state(FindItemState.waiting_query)
+        await callback.answer()
+        await callback.message.answer(format_search_prompt(), parse_mode=ParseMode.HTML)
+
+    elif action == "mail":
+        from bot.handlers.email_handler import cmd_check_mail
+
+        await callback.answer()
+        await cmd_check_mail(callback.message)
+
+    elif action == "agent":
+        await callback.answer()
+        await callback.message.answer(
+            f"{E_SEARCH} <b>Команда субагентов</b>\n\n"
+            f"Отправь команду вида:\n"
+            f"<code>/agent Замена сцепления ВАЗ 2121: регламент, цены, пошаговый план</code>\n\n"
+            f"Бот подключит поисковик, техэксперта, смету и планировщика.",
+            parse_mode=ParseMode.HTML,
+        )
+
+    elif action == "help":
+        from bot.handlers.general_handler import cmd_help
+
+        await callback.answer()
+        await cmd_help(callback.message)
+
+    elif action == "new":
+        await callback.answer()
+        await callback.message.answer(
+            f"{E_LIST} <b>Что делаем?</b>\n\n"
+            f"Просто скажи или напиши:\n"
+            f"• <i>запиши купить масло и фильтр</i>\n"
+            f"• <i>заправил 40 литров на 2400, пробег 152000</i>\n"
+            f"• <i>положил ключ на 13 в синий ящик</i>\n"
+            f"• <i>реши уравнение x² + 5x − 6 = 0</i>",
+            parse_mode=ParseMode.HTML,
+        )
+
+    else:
+        await callback.answer("Кнопка устарела, открой /start", show_alert=True)
+
+
+async def _safe_edit(message: Message, text: str, reply_markup=None) -> None:
+    """Редактирует сообщение, при неудаче отправляет новое (Telegram мог запретить правку)."""
+    try:
+        await message.edit_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Не удалось отредактировать сообщение (%s), отправляю новое", exc)
+        try:
+            await message.answer(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        except Exception:  # noqa: BLE001
+            pass

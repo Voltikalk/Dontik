@@ -1,12 +1,13 @@
 import json
 import logging
+from datetime import datetime
 from typing import Dict, Any, Optional
-from openai import AsyncOpenAI
-from bot.config import settings
+
+from bot.services.llm import chat_completion
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """Ты — интеллектуальный персональный ассистент водителя и владельца гаража/дачи, удобный задачник, а также универсальный умный помощник и консультант на все случаи жизни.
+SYSTEM_PROMPT = """Ты — интеллектуальный персональный ассистент водителя, владельца гаража/дачи и просто надёжный помощник на каждый день.
 Твоя задача — распарсить свободную русскую речь пользователя в строгий JSON.
 
 Возможные значения "intent":
@@ -15,7 +16,6 @@ SYSTEM_PROMPT = """Ты — интеллектуальный персональ�
    - "liters": float (литры)
    - "cost": float (стоимость в рублях)
    - "odometer": int (пробег на одометре в км)
-   - "station": string или null (название АЗС, например Лукойл, Роснефть, Газпромнефть)
 
 2. "service" — техническое обслуживание, ремонт автомобиля, мойка или покупка автозапчастей.
    Поля в "data":
@@ -31,45 +31,48 @@ SYSTEM_PROMPT = """Ты — интеллектуальный персональ�
 
 4. "item_find" — вопрос пользователя о том, где находится вещь/инструмент в гараже/доме (например: "где лежит домкрат?", "где ключи на 13?").
    Поля в "data":
-   - "search_query": string (название предмета для поиска)
+   - "search_query": string (ТОЛЬКО название предмета, без лишних слов. Пример: вопрос "где лежит съёмник подшипников?" -> search_query = "съёмник подшипников")
 
-5. "task_save" — задача, напоминание, список дел, список покупок, любые бытовые и гаражные дела (например: "запиши мне на завтра съездить на дачу купить грабли", "напомни купить омывайку", "надо поменять резину в субботу", "запиши задачу: заехать в сервис").
+5. "task_save" — задача, напоминание, список дел, список покупок, любые бытовые дела (например: "запиши мне на завтра съездить на дачу купить грабли", "напомни купить омывайку", "надо поменять резину в субботу").
    Поля в "data":
-   - "title": string (суть задачи или покупки, сформулированная четко и понятно)
-   - "due_date": string или null (когда нужно сделать: "завтра", "сегодня", "в субботу", "25 сентября" и т.п., либо null если не указано)
+   - "title": string (суть задачи или покупки, чётко и понятно)
+   - "due_date": string или null (срок В ТОЧНОСТИ ТАК, КАК СКАЗАЛ ПОЛЬЗОВАТЕЛЬ: "завтра", "в субботу", "25 сентября")
+   - "due_at": string или null (тот же срок в ISO-формате "YYYY-MM-DDTHH:MM:SS" в МЕСТНОМ времени пользователя. Сегодняшняя дата: {today}, сейчас: {now_local}. Если срока нет — null. Если указано только время суток ("вечером") — поставь 19:00)
 
-6. "task_list" — запрос на просмотр текущих задач, дел, списка покупок или напоминаний (например: "какие у меня дела", "что записано", "покажи список задач", "что нужно сделать", "что купить").
-   Поля в "data": {}
+6. "task_list" — запрос на просмотр текущих задач (например: "какие у меня дела", "покажи список задач", "что купить").
 
-7. "ask_assistant" — любой общий вопрос, консультация, совет (по автомобилю, технике, кулинарии, здоровью, быту, законам, ремонту), просьба найти информацию в интернете или обычное общение ("привет", "как дела", "сколько варить яйца", "какой штраф за превышение на 20 км/ч", "какая погода в Москве", "найди в интернете курс доллара", "сколько стоит iPhone").
+7. "task_delete" — просьба удалить/снять задачу ("удали задачу про грабли", "убери напоминание про масло").
    Поля в "data":
-   - "needs_web_search": boolean (СТАВЬ true, ТОЛЬКО ЕСЛИ требуются СВЕЖИЕ МЕНЯЮЩИЕСЯ данные из интернета: погода сейчас, текущий курс валют, свежие новости за сегодня/вчера, актуальные цены в магазинах, расписание или если пользователь прямо просит: "найди в интернете", "погугли", "поищи в сети". Для исторических тем (династии, правители, даты, события), науки, математики (интегралы, формулы, уравнения, задачи для тренировки, примеры), биографий, терминов, советов, автомеханики, рецептов, расчетов, общения — ВСЕГДА СТАВЬ false, так как твои встроенные знания гораздо полнее и качественнее обрывков из поиска!).
-   - "search_query": string или null (короткий эффективный поисковый запрос для поисковика, если needs_web_search=true; иначе null).
-   - "user_query": string (суть вопроса пользователя).
+   - "title": string (фрагмент названия задачи для поиска, ТОЛЬКО название без служебных слов)
 
-8. "unknown" — только случайный несвязный шум микрофона или неразборчивые звуки.
+8. "ask_assistant" — любой общий вопрос, консультация, совет, расчёт, математика (по автомобилю, технике, кулинарии, здоровью, быту, законам, ремонту, учёбе), просьба найти информацию в интернете или обычное общение ("привет", "как дела", "реши уравнение x^2=38", "сколько варить яйца", "какой штраф за превышение на 20 км/ч", "какая погода в Москве", "сколько стоит iPhone").
+   Поля в "data":
+   - "needs_web_search": boolean (СТАВЬ true ТОЛЬКО ЕСЛИ нужны СВЕЖИЕ МЕНЯЮЩИЕСЯ данные: погода, курс валют, новости за сегодня, цены в магазинах, или пользователь прямо просит "найди в интернете", "погугли". Для исторических тем, науки, МАТЕМАТИКИ, физики, химии, биографий, рецептов, автомеханики, расчётов — ВСЕГДА false, твоих знаний полнее обрывков из поиска).
+   - "search_query": string или null (короткий поисковый запрос, если needs_web_search=true; иначе null).
+   - "user_query": string (полная суть вопроса пользователя, включая все условия задачи для математики).
+
+9. "unknown" — только случайный несвязный шум микрофона или неразборчивые звуки.
 
 ВАЖНЫЕ ПРАВИЛА:
 - Будь максимально гибок к разговорной речи, сленгу и естественным формулировкам.
 - Если человек говорит "надо съездить...", "купить...", "запиши мне...", "напомни..." — это ВСЕГДА "task_save"!
-- Если вопрос не касается записи дел и расходов, а является вопросом/просьбой подсказать — это "ask_assistant".
+- Если в сообщении несколько дел ("запиши купить хлеб и молоко") — это ОДИН intent task_save с title, описывающим ВСЕ дела.
+- Математические задачи, физика, химия, расчёты, учёба — это ВСЕГДА "ask_assistant" с needs_web_search=false.
+- Не выдумывай сроки: due_at = null, если пользователь срок не назвал.
 - Ответ должен быть СТРОГО валидным JSON-объектом без лишнего текста и markdown-оберток.
 
 Формат JSON:
-{
-  "intent": "fuel" | "service" | "item_save" | "item_find" | "task_save" | "task_list" | "ask_assistant" | "unknown",
-  "data": { ... }
-}
+{{
+  "intent": "fuel" | "service" | "item_save" | "item_find" | "task_save" | "task_list" | "task_delete" | "ask_assistant" | "unknown",
+  "data": {{ ... }}
+}}
 """
 
 
-def get_groq_client() -> AsyncOpenAI:
-    """Создает экземпляр AsyncOpenAI клиента для Groq API без блокирующих ретраев."""
-    return AsyncOpenAI(
-        base_url="https://api.groq.com/openai/v1",
-        api_key=settings.GROQ_API_KEY,
-        max_retries=0
-    )
+def build_system_prompt() -> str:
+    """Подставляет актуальную локальную дату в системный промпт."""
+    now = datetime.now()
+    return SYSTEM_PROMPT.format(today=now.strftime("%Y-%m-%d"), now_local=now.strftime("%H:%M"))
 
 
 async def parse_user_intent(text: str, context: Optional[str] = None) -> Dict[str, Any]:
@@ -77,13 +80,8 @@ async def parse_user_intent(text: str, context: Optional[str] = None) -> Dict[st
     Парсит текст пользователя через Groq LLM в строгий JSON.
     Принимает опциональный контекст последних реплик для точного разрешения местоимений
     ("а для 50?", "почему так?", "запиши это").
-    Использует сверхбыстрый gpt-oss-120b с автоматическим fallback на 20b и qwen.
     """
-    client = get_groq_client()
-
-    candidate_models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
-
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages = [{"role": "system", "content": build_system_prompt()}]
     if context:
         messages.append({
             "role": "system",
@@ -91,29 +89,28 @@ async def parse_user_intent(text: str, context: Optional[str] = None) -> Dict[st
         })
     messages.append({"role": "user", "content": text})
 
-    for model_name in candidate_models:
-        try:
-            response = await client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                response_format={"type": "json_object"},
-                temperature=0.1,
-                max_tokens=250
-            )
+    try:
+        content = await chat_completion(
+            messages,
+            preferred_model="openai/gpt-oss-20b",
+            temperature=0.1,
+            max_tokens=400,
+            json_mode=True,
+        )
+        parsed = json.loads(content)
+    except json.JSONDecodeError as exc:
+        logger.warning("Ошибка разбора JSON ответа модели: %s", exc)
+        return {"intent": "unknown", "data": {}}
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Не удалось распознать намерение: %s", exc)
+        return {"intent": "unknown", "data": {}}
 
-            content = response.choices[0].message.content or "{}"
-            parsed = json.loads(content)
+    if not isinstance(parsed, dict) or "intent" not in parsed:
+        logger.warning("Модель вернула неожиданную структуру: %r", parsed)
+        return {"intent": "unknown", "data": {}}
 
-            if "intent" in parsed and "data" in parsed:
-                logger.info(f"Успешный парсинг интента моделью {model_name}: {parsed.get('intent')}")
-                return parsed
-
-        except json.JSONDecodeError as e:
-            logger.warning(f"Ошибка JSONDecode от модели {model_name}: {e}")
-            continue
-        except Exception as e:
-            logger.warning(f"Модель {model_name} вернула ошибку: {e}. Пробуем следующую модель...")
-            continue
-
-    logger.error("Все доступные модели Groq не смогли разобрать сообщение")
-    return {"intent": "unknown", "data": {}}
+    parsed.setdefault("data", {})
+    if not isinstance(parsed["data"], dict):
+        parsed["data"] = {}
+    logger.info("Распознан интент: %s", parsed.get("intent"))
+    return parsed

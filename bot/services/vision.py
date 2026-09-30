@@ -1,118 +1,120 @@
-import io
-import base64
-import logging
-from typing import Optional, List, Dict
-from PIL import Image
-from openai import AsyncOpenAI
+"""Анализ изображений через мультимодальную модель Groq."""
 
-from bot.config import settings
+import base64
+import io
+import logging
+from typing import Optional
+
+from PIL import Image
+
+from bot.services.llm import chat_completion
 
 logger = logging.getLogger(__name__)
 
-VISION_SYSTEM_PROMPT = """Ты — интеллектуальный визуальный эксперт и универсальный персональный помощник.
-Тебя зовут Пётр.
-Ты анализируешь изображения (автозапчасти, инструмент, чеки, показания приборов/одометра, маркировки, схемы, документы, товары и любые бытовые предметы).
+VISION_SYSTEM_PROMPT = """Ты — «Пётр», визуальный эксперт и повседневный помощник.
+Ты анализизируешь изображения: автозапчасти, инструмент, чеки, приборные панели и одометр,
+маркировки и артикулы, схемы и чертежи, документы, товары и бытовые предметы.
 
 ПРАВИЛА ОТВЕТА:
-1. Отвечай на русском языке, четко, информативно и по делу.
-2. Выделяй ключевые термины, названия, артикулы, суммы и показатели жирным шрифтом (**жирный текст**).
-3. Если на фото есть текст, маркировка деталей, артикулы или цифры — обязательно распознай и укажи их.
-4. Если пользователь задал конкретный вопрос к фотографии в подписи — ответь именно на него.
-5. Если подписи нет — подробно опиши, что изображено, дай экспертный комментарий и при необходимости полезный совет.
-6. Для формул и расчетов используй понятные символы Unicode (², ³, √, ±, ≈, °, ·, −), без сырого кода LaTeX.
+1. Отвечай на русском, по делу, без воды.
+2. Ключевые термины, артикулы, суммы и показания выделяй жирным: **так**.
+3. Весь читаемый текст на фото распознавай точно: цифры, маркировку, надписи.
+4. Если в подписи есть конкретный вопрос — отвечай именно на него.
+5. Если подписи нет — опиши, что изображено, и дай полезный экспертный комментарий.
+6. Формулы и расчёты — в LaTeX блоками $$...$$, короткие обозначения — в $...$.
+   Допустимые команды: \\frac{}{}, \\sqrt{}, \\cdot, \\approx, \\pm, \\times.
+   НЕ используй \\boxed и \\begin{align}.
+7. Если на фото плохо видно или это не то, что можно распознать — честно скажи об этом,
+   не выдумывай артикулы и цифры.
 """
 
+# Модели с поддержкой изображений, от самой сильной к быстрой.
+VISION_MODELS = [
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "qwen/qwen3.8-27b",
+]
 
-def get_groq_client() -> AsyncOpenAI:
-    """Создает экземпляр AsyncOpenAI клиента для Groq API."""
-    return AsyncOpenAI(
-        base_url="https://api.groq.com/openai/v1",
-        api_key=settings.GROQ_API_KEY
-    )
+MAX_DIMENSION = 1500
 
 
-def prepare_image_data_uri(image_bytes: bytes, max_dimension: int = 1500) -> str:
+def prepare_image_data_uri(image_bytes: bytes, max_dimension: int = MAX_DIMENSION) -> str:
     """
-    Оптимизирует изображение через Pillow (приведение к RGB, ресайз при превышении max_dimension)
-    и кодирует в data:image/jpeg;base64.
+    Приводит изображение к RGB, уменьшает до max_dimension по большей стороне
+    и кодирует в data:image/jpeg;base64 для API.
     """
     with Image.open(io.BytesIO(image_bytes)) as img:
-        # Конвертация в RGB (на случай RGBA, P или CMYK)
         if img.mode != "RGB":
             img = img.convert("RGB")
 
-        # Ресайз с сохранением пропорций, если изображение очень большое
         w, h = img.size
         if max(w, h) > max_dimension:
             scale = max_dimension / max(w, h)
-            new_w = max(32, int(w * scale))
-            new_h = max(32, int(h * scale))
-            img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            img = img.resize(
+                (max(32, int(w * scale)), max(32, int(h * scale))),
+                Image.Resampling.LANCZOS,
+            )
 
-        # Гарантируем минимальный размер для Groq (не менее 32 пикселей)
         if img.width < 32 or img.height < 32:
-            img = img.resize((max(32, img.width), max(32, img.height)), Image.Resampling.NEAREST)
+            img = img.resize(
+                (max(32, img.width), max(32, img.height)),
+                Image.Resampling.NEAREST,
+            )
 
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=88, optimize=True)
-        b64_str = base64.b64encode(buf.getvalue()).decode("utf-8")
-        return f"data:image/jpeg;base64,{b64_str}"
+        return f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}"
 
 
 async def analyze_image(
     image_bytes: bytes,
     caption: Optional[str] = None,
-    history: Optional[List[Dict[str, str]]] = None
+    history: Optional[list[dict]] = None,
 ) -> str:
     """
-    Анализирует фотографию через модель компьютерного зрения (Groq Qwen Vision).
-    Поддерживает контекст предыдущего диалога и пользовательскую подпись к фото.
+    Анализирует изображение мультимодальной моделью Groq.
+    Поддерживает подпись пользователя и контекст предыдущих реплик диалога.
     """
-    data_uri = prepare_image_data_uri(image_bytes)
+    try:
+        data_uri = prepare_image_data_uri(image_bytes)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Не удалось подготовить изображение: %s", exc)
+        return (
+            "Не получилось прочитать изображение — файл повреждён или формат не поддерживается. "
+            "Пришли фото ещё раз или опиши вопрос текстом."
+        )
 
-    # Формирование запроса к модели
-    text_prompt = caption.strip() if caption and caption.strip() else (
-        "Внимательно изучи эту фотографию. Опиши, что на ней изображено. "
-        "Если на ней есть текст, маркировка, артикулы, числа, чеки или показатели приборов — точно распознай их. "
-        "Дай экспертную оценку или полезный совет."
+    text_prompt = (caption or "").strip() or (
+        "Внимательно изучи фотографию. Опиши, что на ней изображено. "
+        "Если есть текст, маркировка, артикулы, числа или показания приборов — распознай их точно. "
+        "Дай экспертную оценку и полезный совет."
     )
 
-    messages = [{"role": "system", "content": VISION_SYSTEM_PROMPT}]
+    messages: list[dict] = [{"role": "system", "content": VISION_SYSTEM_PROMPT}]
 
-    # Добавляем историю предыдущего общения, если есть
-    if history:
-        for item in history:
-            role = item.get("role")
-            content = item.get("content", "").strip()
-            if role in ["user", "assistant"] and content:
-                messages.append({"role": role, "content": content})
+    for item in history or []:
+        role = item.get("role")
+        content = (item.get("content") or "").strip()
+        if role in ("user", "assistant") and content:
+            messages.append({"role": role, "content": content[:600]})
 
-    # Сообщение пользователя с картинкой
     messages.append({
         "role": "user",
         "content": [
             {"type": "text", "text": text_prompt},
-            {"type": "image_url", "image_url": {"url": data_uri}}
-        ]
+            {"type": "image_url", "image_url": {"url": data_uri}},
+        ],
     })
 
-    client = get_groq_client()
-    candidate_vision_models = ["qwen/qwen3.8-27b"]
-
-    for model_name in candidate_vision_models:
-        try:
-            logger.info(f"Отправка фото в модель зрения: {model_name}")
-            response = await client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                temperature=0.3,
-                max_tokens=2048
-            )
-            content = response.choices[0].message.content or ""
-            if content.strip():
-                return content.strip()
-        except Exception as e:
-            logger.warning(f"Ошибка модели зрения {model_name}: {e}. Пробуем альтернативы...")
-            continue
-
-    return "Не удалось проанализировать изображение через модель компьютерного зрения. Попробуйте отправить другое фото или ракурс."
+    try:
+        return await chat_completion(
+            messages,
+            preferred_model=VISION_MODELS[0],
+            temperature=0.3,
+            max_tokens=1800,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Модель зрения не справилась: %s", exc)
+        return (
+            "Не удалось проанализировать изображение: модель зрения сейчас недоступна. "
+            "Попробуй ещё раз через минуту или опиши вопрос текстом."
+        )

@@ -1,10 +1,8 @@
 import asyncio
 import logging
 from typing import Optional, Dict, Any, List, Callable, Awaitable
-from openai import AsyncOpenAI
 
-from bot.config import settings
-from .base_agent import BaseAgent, AgentResult
+from .base_agent import AgentResult
 from .search_agent import SearchAnalystAgent
 from .tech_expert_agent import TechExpertAgent
 from .doc_finance_agent import DocFinanceAgent

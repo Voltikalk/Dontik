@@ -6,7 +6,6 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
     """Базовый класс для всех моделей SQLAlchemy."""
-    pass
 
 
 class User(Base):
@@ -17,6 +16,7 @@ class User(Base):
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), nullable=False)
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     # Relationships
     fuel_logs: Mapped[List["FuelLog"]] = relationship("FuelLog", back_populates="user", cascade="all, delete-orphan")
@@ -92,7 +92,11 @@ class Task(Base):
     user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     due_date: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    # Распарсенный срок в ISO-формате: нужен для сортировки, подсветки просрочки и напоминаний.
+    due_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    remind_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     is_completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), nullable=False)
 
     # Relationship

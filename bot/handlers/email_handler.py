@@ -1,181 +1,169 @@
-import re
 import html
 import logging
-from aiogram import Router, F
+import re
+
+from aiogram import Router
+from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import Message
-from openai import AsyncOpenAI
 
 from bot.config import settings
 from bot.services.connectors.email_connector import (
     check_inbox,
+    is_email_configured,
     send_email,
-    is_email_configured
 )
 from bot.services.formatters import send_formatted_message
-from bot.database.db import get_session
-from bot.database import crud
-from bot.emojis import (
-    E_INBOX,
-    E_OUTBOX,
-    E_CHECK,
-    E_ALERT,
-)
+from bot.services.llm import chat_completion
 
 logger = logging.getLogger(__name__)
 
-router = Router(name="email_handler_router")
+router = Router(name="email_router")
 
-EMAIL_SUMMARY_PROMPT = """Ты — интеллектуальный ассистент по обработке электронной почты.
-Твоя задача — составить четкую сводку входящих писем для Telegram:
-1. Количество полученных писем.
+EMAIL_SUMMARY_PROMPT = """Ты — ассистент по обработке электронной почты.
+Составь чёткую сводку входящих писем для Telegram на русском языке:
+
+1. Сколько писем в выборке.
 2. По каждому письму:
-   - Отправитель и дата
-   - Тема письма (выдели **жирным**)
-   - Краткая суть в 1-2 предложениях
-   - Важность/срочность (если это счет, чек, код подтверждения, важное уведомление — поставь пометку 🔴 Важно или 🧾 Чек)
-3. Общий вывод (требуется ли срочное действие от пользователя).
+   - отправитель и дата
+   - тема письма (выдели **жирным**)
+   - суть в 1–2 предложениях
+   - пометка важности: 🔴 если это счёт, чек, код подтверждения, штраф или срочное уведомление
+3. Итог: что требуется сделать пользователю и в каком порядке.
 
-Отвечай вежливо, структурированно и лаконично на русском языке.
+Правила:
+- Только факты из текста писем, ничего не выдумывай.
+- Если письма не относятся к делу (реклама, рассылки) — упомяни их одной строкой.
+- Не используй markdown-таблицы.
 """
+
+EMAIL_NOT_CONFIGURED = (
+    "✉️ <b>Почта не подключена</b>\n\n"
+    "Чтобы бот умел читать письма, сделай три шага:\n"
+    "<b>1.</b> В почте (Mail.ru, Яндекс, Gmail) открой "
+    "<i>Настройки → Безопасность → Пароли для внешних приложений</i> "
+    "и создай отдельный пароль для бота.\n"
+    "<b>2.</b> Впиши в файл <code>.env</code>:\n"
+    "<code>EMAIL_USER=твой_email@mail.ru</code>\n"
+    "<code>EMAIL_PASSWORD=пароль_приложения</code>\n"
+    "<b>3.</b> Перезапусти бота."
+)
 
 
 @router.message(Command("mail", "email", "inbox"))
 async def cmd_check_mail(message: Message):
-    """
-    Обработчик команды /mail для проверки входящих писем.
-    """
-    user_id = message.from_user.id
-
+    """Показывает сводку последних писем."""
     if not is_email_configured():
-        help_text = (
-            f"{E_INBOX} <b>Коннектор электронной почты</b>\n\n"
-            "Почтовый ящик еще не подключен в файле конфигурации <code>.env</code>.\n\n"
-            "<b>Как подключить за 1 минуту:</b>\n"
-            "1. В почте (Mail.ru, Яндекс, Gmail) зайдите в Настройки → Безопасность → <b>Пароли для внешних приложений</b> (App Passwords) и создайте отдельный пароль для бота.\n"
-            "2. В файле <code>.env</code> укажите:\n"
-            "<code>EMAIL_USER=vash_email@mail.ru</code>\n"
-            "<code>EMAIL_PASSWORD=vash_parol_prilozheniya</code>\n\n"
-            "<i>После этого бот сможет читать входящие, искать важные письма и отправлять сообщения по вашей команде!</i>"
-        )
-        await message.answer(help_text)
+        await message.answer(EMAIL_NOT_CONFIGURED, parse_mode=ParseMode.HTML)
         return
 
-    status_msg = await message.answer(f"{E_INBOX} <i>Подключаюсь к почтовому серверу и проверяю входящие...</i>")
+    status_msg = await message.answer("✉️ <i>Подключаюсь к почте...</i>")
 
     try:
         emails = await check_inbox(limit=5, unread_only=False)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Ошибка чтения почты: %s", exc, exc_info=True)
+        await _drop(status_msg, "✉️ Не удалось подключиться к почтовому серверу. Попробуй позже.")
+        return
 
-        if not emails:
-            await status_msg.edit_text(f"{E_INBOX} <b>В папке «Входящие» писем не найдено.</b>")
-            return
+    if not emails:
+        await _drop(status_msg, "✉️ <b>В папке «Входящие» писем нет.</b>")
+        return
 
-        # Формируем текст для саммари через LLM
-        email_items_text = []
-        for idx, em in enumerate(emails, 1):
-            email_items_text.append(
-                f"--- Письмо #{idx} ---\n"
-                f"От: {em['sender']}\n"
-                f"Дата: {em['date']}\n"
-                f"Тема: {em['subject']}\n"
-                f"Текст:\n{em['body']}\n"
-            )
-        full_raw_text = "\n\n".join(email_items_text)
+    corpus = "\n\n".join(
+        f"--- Письмо #{i} ---\n"
+        f"От: {em['sender']}\n"
+        f"Дата: {em['date']}\n"
+        f"Тема: {em['subject']}\n"
+        f"Текст:\n{em['body']}"
+        for i, em in enumerate(emails, 1)
+    )
 
-        client = AsyncOpenAI(
-            base_url="https://api.groq.com/openai/v1",
-            api_key=settings.GROQ_API_KEY,
-            max_retries=0
-        )
-        resp = await client.chat.completions.create(
-            model=settings.GROQ_MODEL,
-            messages=[
+    try:
+        summary = await chat_completion(
+            [
                 {"role": "system", "content": EMAIL_SUMMARY_PROMPT},
-                {"role": "user", "content": f"Вот последние письма из почтового ящика:\n\n{full_raw_text}\n\nСделай структурированную сводку."}
+                {"role": "user", "content": f"Последние письма из почтового ящика:\n\n{corpus}"},
             ],
             temperature=0.3,
-            max_tokens=1500
+            max_tokens=1500,
         )
-        summary = resp.choices[0].message.content or "Не удалось сформировать сводку писем."
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Не удалось сделать сводку писем: %s", exc)
+        await _drop(status_msg, "✉️ Не удалось сформировать сводку писем. Попробуй позже.")
+        return
 
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-
-        final_answer = f"{E_INBOX} <b>Сводка последних писем ({len(emails)} шт.):</b>\n\n{summary}"
-        await send_formatted_message(message, final_answer)
-
-        # Сохраняем в память диалога
-        async with get_session() as session:
-            await crud.add_chat_message(session, user_id=user_id, role="user", content="Проверил почту через /mail")
-            await crud.add_chat_message(session, user_id=user_id, role="assistant", content=final_answer)
-
-    except Exception as e:
-        logger.error(f"Ошибка при проверке почты: {e}", exc_info=True)
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-        await message.answer(f"{E_ALERT} Ошибка при подключении к почтовому серверу: {html.quote(str(e))}")
+    await _drop(status_msg, "")
+    await send_formatted_message(
+        message,
+        f"✉️ <b>Сводка писем ({len(emails)} шт.)</b>\n\n{summary}",
+    )
 
 
 @router.message(Command("sendmail"))
 async def cmd_send_mail(message: Message):
-    """
-    Обработчик команды /sendmail для отправки письма.
-    Формат: /sendmail to@example.com | Тема | Текст
-    """
+    """Отправляет письмо: /sendmail кому@почта | Тема | Текст."""
     if not is_email_configured():
-        await message.answer(f"{E_ALERT} Почта не настроена в <code>.env</code> (нужны <code>EMAIL_USER</code> и <code>EMAIL_PASSWORD</code>).")
+        await message.answer(EMAIL_NOT_CONFIGURED, parse_mode=ParseMode.HTML)
         return
 
     text = (message.text or "").strip()
     parts = text.split(maxsplit=1)
 
     if len(parts) < 2 or "|" not in parts[1]:
-        help_text = (
-            f"{E_OUTBOX} <b>Как отправить письмо через бота:</b>\n\n"
-            "Используйте формат через вертикальную черту <code>|</code>:\n"
-            "<code>/sendmail poluchatel@mail.ru | Тема письма | Текст вашего сообщения</code>\n\n"
-            "<b>Пример:</b>\n"
-            "<code>/sendmail ivan@mail.ru | Смета на скважины | Привет, направляю предварительный расчет по демонтажу.</code>"
+        await message.answer(
+            "✉️ <b>Как отправить письмо</b>\n\n"
+            "<code>/sendmail кому@почта | Тема | Текст письма</code>\n\n"
+            "Пример:\n"
+            "<code>/sendmail ivan@mail.ru | Смета | Здравствуйте! Направляю расчёт по демонтажу.</code>",
+            parse_mode=ParseMode.HTML,
         )
-        await message.answer(help_text)
         return
 
-    payload = parts[1]
-    tokens = [t.strip() for t in payload.split("|")]
-
+    tokens = [chunk.strip() for chunk in parts[1].split("|")]
     if len(tokens) < 3:
-        await message.answer(f"{E_ALERT} Укажите все три части через <code>|</code>: адрес получателя, тему и текст.")
+        await message.answer(
+            "✉️ Нужны все три части через <code>|</code>: адрес, тема и текст.",
+            parse_mode=ParseMode.HTML,
+        )
         return
 
     to_addr, subject, body = tokens[0], tokens[1], tokens[2]
 
-    # Базовая валидация email
-    if not re.match(r"^[^@]+@[^@]+\.[^@]+$", to_addr):
-        await message.answer(f"{E_ALERT} Некорректный email адрес получателя: <code>{html.quote(to_addr)}</code>")
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", to_addr):
+        await message.answer(
+            f"✉️ Некорректный адрес: <code>{html.escape(to_addr)}</code>",
+            parse_mode=ParseMode.HTML,
+        )
         return
 
-    status_msg = await message.answer(f"{E_OUTBOX} <i>Отправляю письмо на {html.quote(to_addr)}...</i>")
+    status_msg = await message.answer(f"✉️ <i>Отправляю на {html.escape(to_addr)}...</i>")
 
     try:
         await send_email(to_address=to_addr, subject=subject, text_content=body)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Ошибка отправки письма: %s", exc, exc_info=True)
+        await _drop(status_msg, "✉️ Не удалось отправить письмо. Попробуй позже.")
+        return
+
+    await _drop(
+        status_msg,
+        "✉️ <b>Письмо отправлено</b>\n\n"
+        f"<b>Кому:</b> <code>{html.escape(to_addr)}</code>\n"
+        f"<b>Тема:</b> {html.escape(subject)}\n"
+        f"<b>От кого:</b> {html.escape(settings.EMAIL_USER or '')}",
+    )
+
+
+async def _drop(status_msg: Message, text: str) -> None:
+    """Убирает статус. Если передан текст — показывает его в том же сообщении."""
+    if text:
         try:
-            await status_msg.delete()
-        except Exception:
+            await status_msg.edit_text(text, parse_mode=ParseMode.HTML)
+            return
+        except Exception:  # noqa: BLE001
             pass
-        await message.answer(
-            f"{E_CHECK} <b>Письмо успешно отправлено!</b>\n\n"
-            f"<b>Кому:</b> <code>{html.quote(to_addr)}</code>\n"
-            f"<b>Тема:</b> {html.quote(subject)}\n"
-            f"<b>Отправитель:</b> {html.quote(settings.EMAIL_USER or '')}"
-        )
-    except Exception as e:
-        logger.error(f"Ошибка при отправке письма: {e}", exc_info=True)
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-        await message.answer(f"{E_ALERT} Не удалось отправить письмо: {html.quote(str(e))}")
+    try:
+        await status_msg.delete()
+    except Exception:  # noqa: BLE001
+        pass

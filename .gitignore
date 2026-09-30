@@ -16,10 +16,12 @@ __pycache__/
 temp/
 data/temp/
 
-# Database files
+# Database files and WAL/SHM sidecars
 *.sqlite3
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
 data/*.db
 
 # Logs
@@ -27,6 +29,7 @@ data/*.db
 
 # IDE settings
 .idea/
+.vscode/
 *.swp
 
 # Node dependencies and math render cache

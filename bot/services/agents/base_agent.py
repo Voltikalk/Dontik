@@ -48,4 +48,3 @@ class BaseAgent(abc.ABC):
         :param context: Дополнительный контекст (документы, предыдущие ответы, параметры).
         :return: AgentResult с выводами субагента.
         """
-        pass

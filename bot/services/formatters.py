@@ -1,12 +1,13 @@
 import re
 import logging
 import html as py_html
-from typing import Dict, Any, List
+from datetime import datetime
+from typing import Dict, Any, List, Optional
 from aiogram import html
 from aiogram.enums import ParseMode
 from aiogram.types import Message, LinkPreviewOptions
 
-from bot.database.models import FuelLog, ServiceLog, ItemLocation
+from bot.database.models import FuelLog, ServiceLog, ItemLocation, Task
 from bot.emojis import (
     E_DROP,
     E_WRENCH,
@@ -15,78 +16,227 @@ from bot.emojis import (
     E_SEARCH,
     E_BULB,
     E_LOCATION,
-    E_VOICE_TEXT
+    E_VOICE_TEXT,
+    E_NOTE,
+    E_LIST,
+    E_ALERT,
+    E_CLOCK,
+    E_CHECK,
 )
 
 logger = logging.getLogger(__name__)
 
 
+# --- Единое форматирование чисел (без опасного replace(",", " ") по всему тексту) ---
+
+def fmt_int(value: Any) -> str:
+    """1234567 -> '1 234 567' (неразрывные пробелы для аккуратного выравнивания)."""
+    try:
+        return f"{int(round(float(value))):,}".replace(",", " ")
+    except (TypeError, ValueError):
+        return "—"
+
+
+def fmt_money(value: Any, decimals: int = 0) -> str:
+    """1234.5 -> '1 235 ₽'."""
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    formatted = f"{num:,.{decimals}f}".replace(",", " ")
+    return f"{formatted} ₽"
+
+
+def fmt_liters(value: Any) -> str:
+    try:
+        return f"{float(value):.1f} л"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def fmt_km(value: Any) -> str:
+    return f"{fmt_int(value)} км"
+
+
+def _human_due(raw: Optional[str]) -> Optional[str]:
+    """Красиво показывает срок задачи: ISO-дата -> '14.10.2026', строка -> как есть."""
+    if not raw:
+        return None
+    raw = raw.strip()
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(raw[:19], fmt).strftime("%d.%m.%Y")
+        except ValueError:
+            continue
+    return raw
+
+
+def format_transcript_block(transcript: str, prefix: str = "Распознано") -> str:
+    """Сворачивает распознанный текст голоса в раскрываемую цитату."""
+    if not transcript or not transcript.strip():
+        return ""
+    quoted = html.quote(transcript.strip())
+    return f"<blockquote expandable>{E_VOICE_TEXT} <b>{html.quote(prefix)}:</b>\n{quoted}</blockquote>"
+
+
 def format_fuel_card(data: Dict[str, Any], raw_text: str = "") -> str:
-    """Форматирует карточку подтверждения заправки с expandable blockquote."""
-    liters = data.get("liters", 0.0)
-    cost = data.get("cost", 0.0)
-    odometer = data.get("odometer", 0)
-    station = data.get("station_name") or "Не указана"
+    """Форматирует карточку подтверждения заправки с раскрываемой транскрипцией."""
+    liters = data.get("liters")
+    cost = data.get("cost")
+    odometer = data.get("odometer")
+    station = data.get("station") or data.get("station_name")
 
-    price_per_l = round(cost / liters, 2) if liters and cost else 0.0
+    try:
+        price_per_l = float(cost) / float(liters) if cost and liters else None
+    except (TypeError, ValueError, ZeroDivisionError):
+        price_per_l = None
 
-    lines = [
-        f"{E_DROP} <b>Распознана заправка автомобиля</b>\n",
-        f"• <b>Литры:</b> <code>{liters:.1f} л</code>",
-        f"• <b>Стоимость:</b> <code>{cost:,.2f} ₽</code>",
-        f"• <b>Цена за литр:</b> <code>{price_per_l:.2f} ₽</code>",
-        f"• <b>Пробег на одометре:</b> <code>{odometer:,} км</code>".replace(",", " "),
-        f"• <b>АЗС:</b> <i>{html.quote(str(station))}</i>\n"
-    ]
+    lines = [f"{E_DROP} <b>Заправка</b>\n"]
+    lines.append(f"• <b>Литры:</b> <code>{fmt_liters(liters) if liters is not None else 'не указано'}</code>")
+    lines.append(f"• <b>Сумма:</b> <code>{fmt_money(cost) if cost is not None else 'не указана'}</code>")
+    if price_per_l:
+        lines.append(f"• <b>Цена за литр:</b> <code>{fmt_money(price_per_l, 2)}</code>")
+    lines.append(f"• <b>Пробег:</b> <code>{fmt_km(odometer) if odometer is not None else 'не указан'}</code>")
+    lines.append(f"• <b>АЗС:</b> <i>{html.quote(str(station)) if station else 'не указана'}</i>")
 
-    if raw_text:
-        lines.append(f"<blockquote expandable>{E_VOICE_TEXT} <b>Исходный текст:</b>\n{html.quote(raw_text)}</blockquote>\n")
+    transcript_block = format_transcript_block(raw_text, "Услышал")
+    if transcript_block:
+        lines.append("")
+        lines.append(transcript_block)
 
-    lines.append("<i>Подтвердите сохранение записи в журнал:</i>")
     return "\n".join(lines)
 
 
 def format_service_card(data: Dict[str, Any], raw_text: str = "") -> str:
     """Форматирует карточку подтверждения ТО / ремонта."""
-    title = data.get("title", "Техническое обслуживание")
+    title = data.get("title") or "Техническое обслуживание"
     cost = data.get("cost")
-    odometer = data.get("odometer", 0)
+    odometer = data.get("odometer")
     notes = data.get("notes")
 
-    lines = [
-        f"{E_WRENCH} <b>Распознано сервисное обслуживание / ремонт</b>\n",
-        f"• <b>Работа / Деталь:</b> <b>{html.quote(str(title))}</b>",
-        f"• <b>Пробег:</b> <code>{odometer:,} км</code>".replace(",", " "),
-    ]
-
+    lines = [f"{E_WRENCH} <b>Обслуживание / ремонт</b>\n"]
+    lines.append(f"• <b>Работа:</b> <b>{html.quote(str(title))}</b>")
+    if odometer is not None:
+        lines.append(f"• <b>Пробег:</b> <code>{fmt_km(odometer)}</code>")
     if cost is not None:
-        lines.append(f"• <b>Стоимость:</b> <code>{cost:,.2f} ₽</code>")
+        lines.append(f"• <b>Стоимость:</b> <code>{fmt_money(cost)}</code>")
     if notes:
         lines.append(f"• <b>Заметки:</b> <i>{html.quote(str(notes))}</i>")
 
-    lines.append("")
-    if raw_text:
-        lines.append(f"<blockquote expandable>{E_VOICE_TEXT} <b>Исходный текст:</b>\n{html.quote(raw_text)}</blockquote>\n")
+    transcript_block = format_transcript_block(raw_text, "Услышал")
+    if transcript_block:
+        lines.append("")
+        lines.append(transcript_block)
 
-    lines.append("<i>Подтвердите сохранение записи в журнал:</i>")
     return "\n".join(lines)
 
 
-def format_location_card(data: Dict[str, Any], raw_text: str = "") -> str:
+def format_item_card(data: Dict[str, Any], raw_text: str = "") -> str:
     """Форматирует карточку сохранения местоположения вещи."""
-    item_name = data.get("item_name", "Вещь")
-    location = data.get("location", "Гараж")
+    item_name = data.get("item_name") or "Вещь"
+    location = data.get("location") or "Гараж"
 
-    lines = [
-        f"{E_BOX} <b>Запись в инвентарь гаража/дачи</b>\n",
-        f"• <b>Предмет:</b> <b>{html.quote(str(item_name))}</b>",
-        f"• <b>Место хранения:</b> <code>{html.quote(str(location))}</code>\n"
-    ]
+    lines = [f"{E_BOX} <b>Запомнить место хранения</b>\n"]
+    lines.append(f"• <b>Предмет:</b> <b>{html.quote(str(item_name))}</b>")
+    lines.append(f"• <b>Где лежит:</b> <code>{html.quote(str(location))}</code>")
 
-    if raw_text:
-        lines.append(f"<blockquote expandable>{E_VOICE_TEXT} <b>Исходный текст:</b>\n{html.quote(raw_text)}</blockquote>\n")
+    transcript_block = format_transcript_block(raw_text, "Услышал")
+    if transcript_block:
+        lines.append("")
+        lines.append(transcript_block)
 
-    lines.append("<i>Запомнить это место?</i>")
+    return "\n".join(lines)
+
+
+def format_task_card(data: Dict[str, Any], raw_text: str = "") -> str:
+    """Форматирует карточку новой задачи / покупки."""
+    title = data.get("title") or "Задача"
+    due = _human_due(data.get("due_date"))
+
+    lines = [f"{E_NOTE} <b>Новая задача</b>\n"]
+    lines.append(f"• <b>Дело:</b> <b>{html.quote(str(title))}</b>")
+    if due:
+        lines.append(f"• <b>Срок:</b> <code>{html.quote(str(due))}</code>")
+
+    transcript_block = format_transcript_block(raw_text, "Услышал")
+    if transcript_block:
+        lines.append("")
+        lines.append(transcript_block)
+
+    return "\n".join(lines)
+
+
+def format_search_prompt() -> str:
+    """Приглашение ввести поисковый запрос вещи."""
+    return (
+        f"{E_SEARCH} <b>Что ищем в гараже / на даче?</b>\n\n"
+        f"Напиши одним словом или фразой, например:\n"
+        f"• <i>домкрат</i>\n"
+        f"• <i>съёмник подшипников</i>\n"
+        f"• <i>запасное колесо</i>"
+    )
+
+
+def format_confirmed(intent: str, data: Dict[str, Any], consumption: Optional[float] = None) -> str:
+    """Короткий финальный текст после подтверждения записи."""
+    if intent == "fuel":
+        liters = data.get("liters")
+        cost = data.get("cost")
+        text = f"{E_CHECK} <b>Заправка записана</b>"
+        if liters is not None and cost is not None:
+            text += f" — {fmt_liters(liters)} на {fmt_money(cost)}"
+        if consumption:
+            text += f"\n{E_DROP} Расход: <code>{consumption:.1f} л / 100 км</code>"
+        return text
+
+    if intent == "service":
+        text = f"{E_CHECK} <b>Запись ТО / ремонта сохранена</b>"
+        title = data.get("title")
+        if title:
+            text += f"\n• <b>{html.quote(str(title))}</b>"
+        cost = data.get("cost")
+        if cost is not None:
+            text += f" на <code>{fmt_money(cost)}</code>"
+        return text
+
+    if intent == "item_save":
+        item = data.get("item_name") or "Вещь"
+        loc = data.get("location") or "Гараж"
+        return (
+            f"{E_CHECK} <b>Место сохранено</b>\n"
+            f"• <b>{html.quote(str(item))}</b> → <code>{html.quote(str(loc))}</code>"
+        )
+
+    if intent == "task_save":
+        title = data.get("title") or "Задача"
+        due = _human_due(data.get("due_date"))
+        due_str = f" <i>(срок: {html.quote(str(due))})</i>" if due else ""
+        return f"{E_CHECK} Задача «<b>{html.quote(str(title))}</b>»{due_str} добавлена"
+
+    return f"{E_CHECK} <b>Записано</b>"
+
+
+def format_tasks_list(tasks: List[Task]) -> str:
+    """Форматирует список задач: просроченные и срочные подсвечиваются, срок разбирается."""
+    if not tasks:
+        return f"{E_LIST} <b>Активных задач нет.</b>\n\nСкажи или напиши: <i>«Запиши купить омывайку и съездить на дачу»</i>"
+
+    now = datetime.now()
+    lines = [f"{E_LIST} <b>Активные задачи</b> ({len(tasks)}):\n"]
+
+    for idx, task in enumerate(tasks, 1):
+        due = _human_due(task.due_date)
+        marker = ""
+
+        if task.due_at:
+            if task.due_at < now:
+                marker = f" {E_ALERT} <i>просрочено</i>"
+            elif (task.due_at - now).total_seconds() < 24 * 3600:
+                marker = f" {E_CLOCK} <i>скоро</i>"
+
+        due_str = f"\n    {E_CLOCK} срок: <code>{html.quote(str(due))}</code>{marker}" if due else ""
+        lines.append(f"{idx}. <b>{html.quote(task.title)}</b>{due_str}")
+
     return "\n".join(lines)
 
 
@@ -130,10 +280,12 @@ def format_fuel_history(logs: List[FuelLog]) -> str:
     for it in logs:
         date_str = it.date.strftime("%d.%m.%Y")
         station_str = f" ({html.quote(it.station_name)})" if it.station_name else ""
+        price = (it.cost / it.liters) if it.liters else None
+        price_str = f" · {fmt_money(price, 2)}/л" if price else ""
         lines.append(
             f"• <b>{date_str}</b>{station_str}: "
-            f"<code>{it.liters:.1f} л</code> на <code>{it.cost:,.0f} ₽</code> | "
-            f"<code>{it.odometer:,} км</code>".replace(",", " ")
+            f"<code>{fmt_liters(it.liters)}</code> на <code>{fmt_money(it.cost)}</code>"
+            f"{price_str} · <code>{fmt_km(it.odometer)}</code>"
         )
     return "\n".join(lines)
 
@@ -146,10 +298,10 @@ def format_service_history(logs: List[ServiceLog]) -> str:
     lines = [f"{E_WRENCH} <b>Последние записи ТО и сервиса:</b>\n"]
     for it in logs:
         date_str = it.date.strftime("%d.%m.%Y")
-        cost_str = f" на <code>{it.cost:,.0f} ₽</code>" if it.cost else ""
+        cost_str = f" на <code>{fmt_money(it.cost)}</code>" if it.cost else ""
         lines.append(
-            f"• <b>{date_str}</b>: <b>{html.quote(it.title)}</b>{cost_str} | "
-            f"<code>{it.odometer:,} км</code>".replace(",", " ")
+            f"• <b>{date_str}</b>: <b>{html.quote(it.title)}</b>{cost_str} · "
+            f"<code>{fmt_km(it.odometer)}</code>"
         )
     return "\n".join(lines)
 
@@ -158,17 +310,19 @@ def format_stats_summary(fuel_stats: Dict[str, Any]) -> str:
     """Форматирует общую статистику по расходам."""
     total_liters = fuel_stats.get("total_liters", 0.0)
     total_cost = fuel_stats.get("total_cost", 0.0)
-    avg_price = fuel_stats.get("avg_price", 0.0)
+    avg_price = fuel_stats.get("avg_price_per_liter", 0.0)
     avg_consumption = fuel_stats.get("avg_consumption", 0.0)
+    count = fuel_stats.get("count", 0)
 
     lines = [
-        f"{E_CHART} <b>Сводка расходов на топливо:</b>\n",
-        f"• <b>Всего заправлено:</b> <code>{total_liters:.1f} л</code>",
-        f"• <b>Общие затраты:</b> <code>{total_cost:,.2f} ₽</code>",
-        f"• <b>Средняя цена за литр:</b> <code>{avg_price:.2f} ₽</code>",
+        f"{E_CHART} <b>Сводка расходов на топливо</b> ({count} заправок):\n",
+        f"• <b>Всего заправлено:</b> <code>{fmt_liters(total_liters)}</code>",
+        f"• <b>Общие затраты:</b> <code>{fmt_money(total_cost)}</code>",
+        f"• <b>Средняя цена за литр:</b> <code>{fmt_money(avg_price, 2)}</code>",
     ]
     if avg_consumption > 0:
         lines.append(f"• <b>Средний расход:</b> <code>{avg_consumption:.1f} л / 100 км</code>")
+    lines.append(f"\n{E_BULB} _История заправок доступна кнопкой выше._")
     return "\n".join(lines)
 
 from pylatexenc.latex2text import LatexNodes2Text, get_default_latex_context_db, MacroTextSpec
@@ -518,7 +672,7 @@ def fix_squished_bullets(text: str) -> str:
     lines = text.split('\n')
     new_lines = []
     for line in lines:
-        stripped = line.strip()
+        line.strip()
         # Если строка источников приклеена к концу списка через точку:
         m = re.search(r'(\s*•\s*)?(🔗\s*(?:\*\*)?Источники:.*)', line)
         if m and line.strip() != m.group(0).strip():

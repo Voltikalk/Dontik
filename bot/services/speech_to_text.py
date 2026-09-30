@@ -1,51 +1,36 @@
-import os
+"""Транскрибация голосовых сообщений через Groq Whisper."""
+
 import logging
+import os
 from pathlib import Path
-from openai import AsyncOpenAI
-from bot.config import settings
+
+from bot.services.llm import transcribe_audio
 
 logger = logging.getLogger(__name__)
 
 
-def get_groq_client() -> AsyncOpenAI:
-    """Создает или возвращает экземпляр AsyncOpenAI клиента для Groq API."""
-    return AsyncOpenAI(
-        base_url="https://api.groq.com/openai/v1",
-        api_key=settings.GROQ_API_KEY
-    )
-
-
 async def transcribe_voice(file_path: str) -> str:
     """
-    Асинхронная транскрибация голосового сообщения через Groq Whisper.
-    
-    - Модель: whisper-large-v3-turbo
-    - Язык: ru
-    - В блоке finally гарантированно удаляет временный аудиофайл.
+    Асинхронная транскрибация голосового сообщения.
+
+    Модель и язык берутся из конфигурации (GROQ_WHISPER_MODEL, язык ru).
+    Ретраи и перебор моделей делает bot.services.llm.
+    В блоке finally временный аудиофайл гарантированно удаляется.
     """
-    client = get_groq_client()
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Аудиофайл не найден: {file_path}")
+
     try:
-        path = Path(file_path)
-        if not path.exists():
-            raise FileNotFoundError(f"Аудиофайл не найден: {file_path}")
-
         with open(file_path, "rb") as audio_file:
-            transcription = await client.audio.transcriptions.create(
-                model="whisper-large-v3-turbo",
-                file=audio_file,
-                language="ru",
-                response_format="text"
-            )
-            return transcription.strip() if isinstance(transcription, str) else str(transcription).strip()
-
-    except Exception as e:
-        logger.error(f"Ошибка транскрибации Groq Whisper для файла {file_path}: {e}", exc_info=True)
+            return await transcribe_audio(audio_file, path.name)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Ошибка транскрибации Groq Whisper (%s): %s", path.name, exc)
         raise
     finally:
-        # Гарантированное удаление временного аудиофайла
         try:
             if os.path.exists(file_path):
                 os.remove(file_path)
-                logger.debug(f"Временный аудиофайл успешно удален: {file_path}")
+                logger.debug("Временный аудиофайл удалён: %s", file_path)
         except OSError as err:
-            logger.warning(f"Не удалось удалить временный аудиофайл {file_path}: {err}")
+            logger.warning("Не удалось удалить временный аудиофайл %s: %s", file_path, err)

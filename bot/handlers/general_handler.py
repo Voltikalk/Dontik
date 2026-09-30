@@ -1,446 +1,410 @@
-import logging
-from aiogram import Router, html, F
-from aiogram.enums import ParseMode
-from aiogram.filters import CommandStart, Command
-from aiogram.types import Message
-from aiogram.fsm.context import FSMContext
+"""Команды бота, быстрые фразы и обработка обычного текста."""
 
-from bot.database.db import get_session
+import logging
+
+from aiogram import F, Router, html
+from aiogram.enums import ParseMode
+from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.types import Message
+
 from bot.database import crud
-from bot.keyboards.inline import get_tasks_keyboard, get_entry_confirm_keyboard, get_main_menu_keyboard
-from bot.services.intent_parser import parse_user_intent
-from bot.services.assistant import answer_query, stream_assistant_response
-from bot.services.draft_store import save_draft
-from bot.handlers.voice_handler import format_markdown_card
-from bot.handlers.states import GarageEntryState
-from bot.services.formatters import send_formatted_message
-from bot.services.agents import MultiAgentOrchestrator
+from bot.database.db import get_session
 from bot.emojis import (
+    E_ALERT,
+    E_BULB,
+    E_CHART,
+    E_DROP,
+    E_GLOBE,
     E_HELLO,
     E_MIC,
     E_NOTE,
-    E_GLOBE,
-    E_BULB,
-    E_DROP,
-    E_BOX,
-    E_DOC,
-    E_PHOTO,
-    E_BOT,
     E_PIN,
-    E_SEARCH,
-    E_WRENCH,
-    E_CHART,
-    E_LIST,
-    E_REPEAT,
-    E_ALERT,
-    E_PARTY,
-    E_LOCATION,
-    E_THINK,
     E_QUESTION,
+    E_REPEAT,
+    E_WRENCH,
+)
+from bot.handlers.input_handler import process_input, send_tasks_list
+from bot.keyboards.inline import get_main_menu_keyboard
+from bot.services.agents import MultiAgentOrchestrator
+from bot.services.formatters import (
+    fmt_int,
+    fmt_km,
+    fmt_money,
+    format_all_items_list,
 )
 
 logger = logging.getLogger(__name__)
 
+router = Router(name="general_router")
+
 orchestrator = MultiAgentOrchestrator()
 
-router = Router(name="general_handler_router")
+# Естественные синонимы команд: фраза пользователя -> команда.
+# Один фразе несколько синонимов, группируем в кортежи.
+NATURAL_COMMAND_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("start", ("меню", "старт", "начать", "панель", "главное")),
+    ("tasks", (
+        "задачи", "дела", "список задач", "список дел", "что сделать",
+        "планы", "todo", "todo list", "задача", "чем заняться",
+    )),
+    ("stats", (
+        "статистика", "статы", "расходы", "заправки", "сводка",
+        "итоги", "статистика по машине",
+    )),
+    ("items", ("вещи", "гараж", "инвентарь", "где что лежит", "склад", "дача")),
+    ("history_fuel", ("история заправок", "журнал заправок", "мои заправки")),
+    ("history_service", ("история сервиса", "журнал то", "мои ремонты")),
+    ("mail", (
+        "почта", "письма", "входящие", "входящие письма", "новые письма",
+        "проверь почту", "проверить почту", "что на почте",
+    )),
+    ("help", ("помощь", "справка", "инструкция", "как пользоваться", "что ты умеешь")),
+    ("clear", (
+        "забудь", "сброс", "сбрось контекст", "очисти контекст",
+        "очистить контекст", "очисти память", "очистить память",
+        "начнем заново", "начать заново", "забудь все",
+    )),
+)
 
+NATURAL_COMMANDS: dict[str, str] = {}
+for _command, _phrases in NATURAL_COMMAND_GROUPS:
+    for _phrase in _phrases:
+        NATURAL_COMMANDS[_phrase] = _command
+
+
+def _match_natural_command(text: str) -> str | None:
+    """Возвращает команду, если фраза целиком совпала с синонимом.
+
+    Совпадение должно быть полным: «купить грабли» — это задача, а не команда.
+    """
+    normalized = " ".join((text or "").lower().strip().rstrip("!?.»").split())
+    if not normalized:
+        return None
+    return NATURAL_COMMANDS.get(normalized)
+
+
+# --- /start ---
 
 @router.message(CommandStart())
-async def cmd_start(message: Message):
-    """
-    Обработчик команды /start.
-    Приветствие по имени и подсказка по использованию голосового ввода.
-    """
-    first_name = message.from_user.first_name or "Автомобилист"
-    safe_name = html.quote(first_name)
+async def cmd_start(message: Message, state: FSMContext):
+    """Приветствие с понятным описанием возможностей."""
+    await state.clear()
+    first_name = html.quote(message.from_user.first_name or "водитель")
 
     text = (
-        f"{E_HELLO} <b>Привет, {safe_name}!</b>\n\n"
-        "Я твой личный универсальный помощник, задачник и авто-гаражный ассистент.\n\n"
-        f"{E_MIC} <b>Ты можешь писать текстом или просто зажать микрофон:</b>\n"
-        f"• {E_NOTE} <b>Задачи:</b> <i>«Запиши на завтра съездить на дачу, купить грабли»</i>\n"
-        f"• {E_GLOBE} <b>Поиск в сети:</b> <i>«Какая погода завтра в Самаре?»</i> или <i>«Курс доллара»</i>\n"
-        f"• {E_BULB} <b>Советы и вопросы:</b> <i>«Как прокачать тормоза на Ниве?»</i>\n"
-        f"• {E_DROP} <b>Заправки:</b> <i>«Заправил 35 литров на две тысячи, пробег 150 000»</i>\n"
-        f"• {E_BOX} <b>Вещи:</b> <i>«Положил домкрат под верстак»</i> / <i>«Где лежит домкрат?»</i>\n"
-        f"• {E_DOC} <b>Документы:</b> отправляй PDF, Word (.docx), Excel (.xlsx, .csv), TXT для анализа\n"
-        f"• {E_PHOTO} <b>Фотографии:</b> присылай фото деталей, чеков, приборов, схем или предметов\n"
-        f"• {E_BOT} <b>Субагенты:</b> <code>/agent</code> — запуск команды субагентов для глубокого разбора\n\n"
-        f"{E_PIN} <b>Быстрые команды:</b>\n"
-        "/agent — глубокое исследование задачи командой субагентов\n"
-        "/tasks — список актуальных задач с кнопками выполнения\n"
-        "/stats — сводка по заправкам и ремонтам\n"
-        "/items — каталог вещей в гараже\n"
-        "/clear — сбросить контекст диалога\n"
-        "/help — подробная справка"
+        f"{E_HELLO} <b>Привет, {first_name}!</b>\n\n"
+        f"Я <b>Пётр</b> — твой ежедневный помощник и авто-гаражный ассистент. "
+        f"Пиши текстом или просто говори голосом.\n\n"
+        f"{E_NOTE} <b>Задачи и покупки</b>\n"
+        f"  <i>«Запиши на завтра съездить на дачу и купить грабли»</i>\n"
+        f"{E_DROP} <b>Заправки</b>\n"
+        f"  <i>«Заправил 42 литра на 2500, пробег 154300, Лукойл»</i>\n"
+        f"{E_WRENCH} <b>Сервис и ремонты</b>\n"
+        f"  <i>«Поменял масло и фильтр, 6200 руб, пробег 155000»</i>\n"
+        f"{E_PIN} <b>Вещи в гараже</b>\n"
+        f"  <i>«Положил домкрат под верстак»</i> / <i>«Где лежит домкрат?»</i>\n"
+        f"{E_GLOBE} <b>Вопросы, советы и поиск</b>\n"
+        f"  <i>«Курс доллара»</i> · <i>«Как прокачать тормоза на Ниве?»</i>\n"
+        f"{E_CHART} <b>Математика и расчёты</b>\n"
+        f"  <i>«Реши уравнение x² + 5x − 6 = 0»</i> — формулы рисуются прямо в чате\n"
+        f"{E_BULB} <b>Файлы и фото</b>\n"
+        f"  PDF, Word, Excel, CSV, фото чеков, деталей и схем — разберу и отвечу\n\n"
+        f"{E_MIC} <b>Команды:</b> /tasks · /stats · /items · /agent · /clear · /help"
     )
-    await message.answer(text, reply_markup=get_main_menu_keyboard())
+    await message.answer(text, reply_markup=get_main_menu_keyboard(), parse_mode=ParseMode.HTML)
 
 
-@router.message(Command("agent", "research"))
-async def cmd_agent(message: Message):
-    """
-    Обработчик команды /agent или /research для запуска мультиагентной системы.
-    """
-    user_id = message.from_user.id
-    text = (message.text or "").strip()
-    parts = text.split(maxsplit=1)
+# --- /tasks ---
 
-    if len(parts) < 2 or not parts[1].strip():
-        help_text = (
-            f"{E_BOT} <b>Команда субагентов (Multi-Agent System)</b>\n\n"
-            "Запускает совместную работу специализированных субагентов для глубокого решения задачи:\n"
-            f"• {E_SEARCH} <b>Поиск и аналитика</b> — мониторинг цен, артикулов и предложений в сети\n"
-            f"• {E_WRENCH} <b>Технический эксперт</b> — регламенты, инструмент, моменты затяжки, нюансы ремонта\n"
-            f"• {E_CHART} <b>Сметы и расчеты</b> — финансовая калькуляция, аудит расходов, сравнение смет\n"
-            f"• {E_LIST} <b>Планировщик</b> — пошаговый чек-лист этапов и временные оценки\n\n"
-            f"{E_BULB} <b>Примеры запуска:</b>\n"
-            "<code>/agent Замена сцепления на ВАЗ 2121 Нива: регламент, цены на комплект Valeo и пошаговый план</code>\n\n"
-            "<code>/agent Капитальный ремонт дачной беседки: смета материалов, закупка и этапы</code>"
-        )
-        await message.answer(help_text)
-        return
-
-    task = parts[1].strip()
-    status_msg = await message.answer(f"{E_BOT} <i>Запуск команды субагентов...</i>")
-
-    async def update_progress(msg: str):
-        try:
-            await status_msg.edit_text(msg)
-        except Exception:
-            pass
-
-    try:
-        async with get_session() as session:
-            history = await crud.get_recent_chat_history(session, user_id=user_id, limit=3)
-
-        context = {}
-        if history:
-            context["history"] = history
-
-        final_report = await orchestrator.execute_task(
-            task=task,
-            context=context,
-            on_progress=update_progress
-        )
-
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-
-        await send_formatted_message(message, final_report)
-
-        # Сохраняем в историю диалога
-        async with get_session() as session:
-            await crud.add_chat_message(session, user_id=user_id, role="user", content=f"/agent {task}")
-            await crud.add_chat_message(session, user_id=user_id, role="assistant", content=final_report)
-
-    except Exception as e:
-        logger.error(f"Ошибка при работе субагентов: {e}", exc_info=True)
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-        await message.answer(f"{E_ALERT} <b>Ошибка при выполнении задачи субагентами:</b> {html.quote(str(e))}")
+@router.message(Command("tasks", "todo"))
+async def cmd_tasks(message: Message):
+    await send_tasks_list(message, message.from_user.id)
 
 
-@router.message(Command("stats"))
+# --- /stats ---
+
+@router.message(Command("stats", "statistics"))
 async def cmd_stats(message: Message):
-    """
-    Обработчик команды /stats.
-    Выводит сводку по последней заправке и последнему ремонту.
-    """
+    """Сводка: последняя заправка, последний сервис, средний расход."""
     user_id = message.from_user.id
 
     async with get_session() as session:
         last_fuel = await crud.get_last_fuel_log(session, user_id=user_id)
         last_service = await crud.get_last_service_log(session, user_id=user_id)
+        consumption = await crud.get_avg_consumption(session, user_id=user_id)
 
-    lines = [f"{E_CHART} <b>Сводка по автомобилю:</b>\n"]
+    lines = [f"{E_CHART} <b>Сводка по автомобилю</b>\n"]
 
-    # Блок последней заправки
     if last_fuel:
-        fuel_date = last_fuel.date.strftime("%d.%m.%Y")
-        station_str = f" (АЗС: {html.quote(last_fuel.station_name)})" if last_fuel.station_name else ""
+        price = (last_fuel.cost / last_fuel.liters) if last_fuel.liters else None
+        price_str = f" · {fmt_money(price, 2)}/л" if price else ""
+        station = f" · {html.quote(last_fuel.station_name)}" if last_fuel.station_name else ""
         lines.append(
-            f"{E_DROP} <b>Последняя заправка ({fuel_date}):</b>\n"
-            f"• Объем: <code>{last_fuel.liters:.1f} л</code>\n"
-            f"• Стоимость: <code>{last_fuel.cost:,.0f} ₽</code>\n"
-            f"• Пробег: <code>{last_fuel.odometer:,} км</code>{station_str}\n".replace(",", " ")
+            f"{E_DROP} <b>Последняя заправка</b> ({last_fuel.date.strftime('%d.%m.%Y')})\n"
+            f"  <code>{last_fuel.liters:.1f} л</code> на <code>{fmt_money(last_fuel.cost)}</code>{price_str}\n"
+            f"  пробег <code>{fmt_km(last_fuel.odometer)}</code>{station}"
         )
     else:
-        lines.append(f"{E_DROP} <b>Последняя заправка:</b> <i>записей пока нет</i>\n")
+        lines.append(f"{E_DROP} <b>Заправок пока нет</b> — <i>скажи «заправился»</i>")
 
-    # Блок последнего сервиса / ТО
     if last_service:
-        service_date = last_service.date.strftime("%d.%m.%Y")
-        cost_str = f" на <code>{last_service.cost:,.0f} ₽</code>" if last_service.cost else ""
-        notes_str = f"\n• Заметки: <i>{html.quote(last_service.notes)}</i>" if last_service.notes else ""
+        cost = f" на <code>{fmt_money(last_service.cost)}</code>" if last_service.cost else ""
         lines.append(
-            f"{E_WRENCH} <b>Последнее ТО / ремонт ({service_date}):</b>\n"
-            f"• Работы: <b>{html.quote(last_service.title)}</b>{cost_str}\n"
-            f"• Пробег: <code>{last_service.odometer:,} км</code>{notes_str}\n".replace(",", " ")
+            f"{E_WRENCH} <b>Последний сервис</b> ({last_service.date.strftime('%d.%m.%Y')})\n"
+            f"  {html.quote(last_service.title)}{cost}\n"
+            f"  пробег <code>{fmt_km(last_service.odometer)}</code>"
         )
     else:
-        lines.append(f"{E_WRENCH} <b>Последнее ТО / ремонт:</b> <i>записей пока нет</i>\n")
+        lines.append(f"{E_WRENCH} <b>Записей сервиса нет</b> — <i>скажи, что делал</i>")
 
-    await message.answer("\n".join(lines), reply_markup=get_main_menu_keyboard())
+    if consumption:
+        lines.append(f"\n{E_DROP} Средний расход: <code>{consumption} л / 100 км</code>")
+
+    await message.answer(
+        "\n\n".join(lines),
+        reply_markup=get_main_menu_keyboard(),
+        parse_mode=ParseMode.HTML,
+    )
 
 
-@router.message(Command("tasks", "todo"))
-async def cmd_tasks(message: Message):
-    """
-    Обработчик команды /tasks и /todo.
-    Выводит список активных задач пользователя.
-    """
-    user_id = message.from_user.id
-
-    async with get_session() as session:
-        tasks = await crud.get_active_tasks(session, user_id=user_id)
-
-    if not tasks:
-        await message.answer(
-            f"{E_PARTY} <b>Список задач пуст!</b>\n\n"
-            "Чтобы добавить дело или покупку, просто скажите голосовым сообщением, например:\n"
-            "<i>«Запиши на завтра съездить на дачу, купить грабли»</i>"
-        )
-        return
-
-    lines = [f"{E_LIST} <b>Твой актуальный список дел и задач:</b>\n"]
-    for idx, t in enumerate(tasks, 1):
-        due_str = f" <i>(срок: {html.quote(t.due_date)})</i>" if t.due_date else ""
-        lines.append(f"{idx}. <b>{html.quote(t.title)}</b>{due_str}")
-
-    kb = get_tasks_keyboard(tasks)
-    await message.answer("\n".join(lines), reply_markup=kb)
-
+# --- /items ---
 
 @router.message(Command("items", "garage"))
 async def cmd_items(message: Message):
-    """
-    Обработчик команды /items и /garage.
-    Выводит список сохраненных вещей в гараже/на даче.
-    """
     user_id = message.from_user.id
     async with get_session() as session:
         items = await crud.list_all_items(session, user_id=user_id)
 
-    if not items:
-        await message.answer(
-            f"{E_BOX} <b>В гараже пока ничего не записано.</b>\n\n"
-            "Чтобы сохранить местоположение вещи, просто скажите голосовым сообщением, например:\n"
-            "<i>«Положил домкрат под верстак»</i>"
-        )
+    text = format_all_items_list(items)
+    if items:
+        text += f"\n\nВсего предметов: <code>{fmt_int(len(items))}</code>"
+    await message.answer(text, reply_markup=get_main_menu_keyboard(), parse_mode=ParseMode.HTML)
+
+
+# --- /agent ---
+
+AGENT_HELP = (
+    f"{E_BULB} <b>Команда субагентов</b>\n\n"
+    f"Запускает several специалистов параллельно и собирает один проверенный отчёт:\n"
+    f"• <b>Поиск</b> — цены, артикулы, актуальные предложения\n"
+    f"• <b>Техэксперт</b> — регламент, инструмент, нюансы ремонта\n"
+    f"• <b>Смета</b> — расчёт бюджета и сравнение вариантов\n"
+    f"• <b>Планировщик</b> — пошаговый чек-лист\n"
+    f"• <b>Критик</b> — ищет ошибки и скрытые расходы\n\n"
+    f"<b>Примеры:</b>\n"
+    f"<code>/agent Замена сцепления ВАЗ 2121: регламент, цены на комплект Valeo, план работ</code>\n"
+    f"<code>/agent Капитальный ремонт беседки: смета материалов и этапы</code>\n"
+    f"<code>/agent Почему двигатель перегревает на Ниве?</code>"
+)
+
+
+@router.message(Command("agent", "research"))
+async def cmd_agent(message: Message):
+    user_id = message.from_user.id
+    text = (message.text or "").strip()
+    parts = text.split(maxsplit=1)
+
+    if len(parts) < 2 or not parts[1].strip():
+        await message.answer(AGENT_HELP, parse_mode=ParseMode.HTML)
         return
 
-    lines = [f"{E_BOX} <b>Список вещей на хранении:</b>\n"]
-    for idx, it in enumerate(items, 1):
-        lines.append(f"{idx}. <b>{html.quote(it.item_name)}</b> — <code>{html.quote(it.location)}</code>")
-    lines.append(f"\n{E_BULB} <i>Чтобы найти конкретную вещь, спросите голосовым: «Где лежит ...?»</i>")
-    await message.answer("\n".join(lines), reply_markup=get_main_menu_keyboard())
+    task = parts[1].strip()
+    status_msg = await message.answer(f"{E_BULB} <i>Запускаю субагентов...</i>")
+    last_rendered = ""
 
+    async def update_progress(msg: str) -> None:
+        """Редактирует статус, но не чаще раза в секунду и только при реальном изменении."""
+        nonlocal last_rendered
+        if msg == last_rendered:
+            return
+        try:
+            await status_msg.edit_text(msg)
+            last_rendered = msg
+        except Exception:  # noqa: BLE001
+            pass
+
+    try:
+        history = await _load_history(user_id)
+        report = await orchestrator.execute_task(
+            task=task,
+            context={"history": history} if history else {},
+            on_progress=update_progress,
+        )
+
+        from bot.services.formatters import send_formatted_message
+
+        try:
+            await status_msg.delete()
+        except Exception:  # noqa: BLE001
+            pass
+        await send_formatted_message(message, report)
+
+        async with get_session() as session:
+            await crud.add_chat_message(session, user_id=user_id, role="user", content=f"/agent {task}")
+            await crud.add_chat_message(session, user_id=user_id, role="assistant", content=report[:4000])
+
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Ошибка субагентов: %s", exc, exc_info=True)
+        try:
+            await status_msg.delete()
+        except Exception:  # noqa: BLE001
+            pass
+        await message.answer(
+            f"{E_ALERT} <b>Команда субагентов не справилась.</b>\n"
+            f"Попробуй уточнить задачу или задать вопрос обычным сообщением.",
+            parse_mode=ParseMode.HTML,
+        )
+
+
+async def _load_history(user_id: int) -> list[dict]:
+    try:
+        async with get_session() as session:
+            return await crud.get_recent_chat_history(session, user_id=user_id, limit=6)
+    except Exception:  # noqa: BLE001
+        return []
+
+
+# --- /clear ---
+
+@router.message(Command("clear", "reset"))
+async def cmd_clear(message: Message):
+    user_id = message.from_user.id
+    async with get_session() as session:
+        removed = await crud.clear_chat_history(session, user_id=user_id)
+
+    await message.answer(
+        f"{E_REPEAT} <b>Память диалога очищена</b> (удалено сообщений: {fmt_int(removed)}).\n"
+        f"Начинаем с чистого листа — задавай новый вопрос.",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+# --- /help ---
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
-    """
-    Обработчик команды /help.
-    Справочная информация и примеры использования.
-    """
     text = (
-        f"{E_BULB} <b>Как пользоваться ботом «Авто-Гараж и Персональный Ассистент»:</b>\n\n"
-        f"{E_MIC} <b>Голосовое и текстовое управление:</b>\n"
-        "Вы можете как зажать кнопку микрофона, так и просто написать текст в чат:\n\n"
-        f"{E_NOTE} <b>Задачи и напоминания:</b>\n"
-        "• <i>«Запиши на завтра съездить на работу к Николаю Викторовичу»</i>\n"
-        "• <i>«Напомни в субботу поменять масло»</i>\n"
-        "• <i>«Какие у меня дела?»</i> (выведет список задач с кнопками завершения)\n\n"
-        f"{E_GLOBE} <b>Поиск в интернете (подключается автоматически):</b>\n"
-        "• <i>«Какая погода завтра в Москве?»</i>\n"
-        "• <i>«Найди актуальный курс доллара и евро»</i>\n"
-        "• <i>«Сколько стоит резина 205/55 R16?»</i>\n\n"
-        f"{E_BULB} <b>Вопросы, математика и экспертные советы:</b>\n"
-        "• <i>«Реши уравнение x^2 = 38»</i>\n"
-        "• <i>«А почему два корня?»</i> (бот помнит контекст прошлых вопросов!)\n"
-        "• <i>«Как прокачать тормоза на классике?»</i>\n\n"
-        f"{E_DOC} <b>Анализ документов (PDF, Word, Excel, CSV, TXT):</b>\n"
-        "• Отправьте файл боту (можно с вопросом в подписи, например: <i>«Сделай краткое резюме»</i>, <i>«Посчитай итог по расходам»</i>)\n"
-        "• Бот извлечет текст и таблицы и даст подробный ответ.\n\n"
-        f"{E_PHOTO} <b>Распознавание фотографий (Vision):</b>\n"
-        "• Отправьте фото автозапчасти, приборной панели, чека, схемы или инструмента — бот определит детали, распознает текст, маркировку и ответит на вопросы.\n\n"
-        f"{E_DROP} <b>Заправки автомобиля:</b>\n"
-        "• <i>«Заправил сорок литров на 2500 рублей, пробег 155 000, Газпромнефть»</i>\n\n"
-        f"{E_WRENCH} <b>Сервис и ремонты:</b>\n"
-        "• <i>«Поменял тормозные диски и колодки, отдал 8000 руб, пробег 156 000»</i>\n\n"
-        f"{E_BOX} <b>Поиск и хранение вещей:</b>\n"
-        "• <i>«Положил зарядник для аккумулятора в синий ящик»</i>\n"
-        "• <i>«Где лежит зарядник?»</i>\n\n"
-        f"{E_BOT} <b>Команда субагентов (Multi-Agent System):</b>\n"
-        "• <code>/agent &lt;задача&gt;</code> — запускает команду узких специалистов (поиск цен, техэкспертиза, расчет сметы и пошаговый план) для глубокого решения комплексных задач.\n\n"
-        f"{E_PIN} <b>Быстрые команды из меню ввода:</b>\n"
-        "/agent — запуск команды субагентов для глубокого разбора\n"
-        "/tasks — актуальный список дел\n"
-        "/stats — сводка по заправкам и ремонтам\n"
-        "/items — каталог вещей в гараже\n"
-        "/clear — сбросить контекст диалога (начать заново)\n"
-        "/help — подробная справка\n"
-        "/start — главное меню"
+        f"{E_BULB} <b>Как пользоваться</b>\n\n"
+        f"Можешь писать текстом или голосом — работает одинаково.\n\n"
+        f"<b>Задачи и покупки</b>\n"
+        f"• <i>«Запиши на завтра купить масло и фильтр»</i>\n"
+        f"• <i>«Напомни в субботу поменять резину»</i>\n"
+        f"• <i>«Какие у меня дела?»</i> · <i>«Удали задачу про грабли»</i>\n\n"
+        f"<b>Машина и гараж</b>\n"
+        f"• <i>«Заправил 40 литров на 2400, пробег 152000, Газпром»</i>\n"
+        f"• <i>«Поменял колодки, 8000 руб, пробег 156000»</i>\n"
+        f"• <i>«Положил ключ на 13 в синий ящик»</i>\n"
+        f"• <i>«Где лежит домкрат?»</i>\n\n"
+        f"<b>Вопросы, советы, поиск</b>\n"
+        f"• <i>«Какая погода в Самаре?»</i> · <i>«Курс доллара»</i>\n"
+        f"• <i>«Какой штраф за превышение на 20 км/ч?»</i>\n"
+        f"• <i>«Посчитай расход топлива по 10 заправкам»</i>\n\n"
+        f"<b>Математика</b>\n"
+        f"• <i>«Реши уравнение x² + 5x − 6 = 0»</i>\n"
+        f"• <i>«Найди производную функции»</i> · <i>«Вычисли интеграл»</i>\n"
+        f"• <i>«Посчитай скидку 15% от 3400»</i>\n"
+        f"Формулы выводятся нативными блоками прямо в чате.\n\n"
+        f"<b>Файлы и фото</b>\n"
+        f"Пришли PDF, Word, Excel, CSV или фото — разберу содержимое и отвечу. "
+        f"В подписи можно сразу написать вопрос.\n\n"
+        f"{E_PIN} <b>Команды</b>\n"
+        f"/tasks — задачи · /stats — сводка · /items — вещи\n"
+        f"/agent — субагенты · /mail — почта · /clear — сброс памяти\n"
+        f"/start — главное меню · /help — эта справка"
     )
-    await message.answer(text, reply_markup=get_main_menu_keyboard())
+    await message.answer(text, reply_markup=get_main_menu_keyboard(), parse_mode=ParseMode.HTML)
 
 
-@router.message(Command("clear"))
-@router.message(Command("reset"))
-async def cmd_clear_history(message: Message):
-    """
-    Обработчик команды /clear и /reset.
-    Очищает историю диалога пользователя (память контекста).
-    """
-    user_id = message.from_user.id
-    async with get_session() as session:
-        await crud.clear_chat_history(session, user_id=user_id)
-    await message.answer(f"{E_REPEAT} <b>Память диалога очищена.</b>\nЗадавай новый вопрос — я готов к новой теме!")
-
+# --- Обычный текст и естественные команды ---
 
 @router.message(F.text & ~F.text.startswith("/"))
-async def handle_text_message(message: Message, state: FSMContext):
-    """
-    Универсальный обработчик обычных текстовых сообщений.
-    Позволяет вводить задачи, вести учет расходов и задавать любые вопросы
-    текстом точно так же, как и голосом, с полной поддержкой памяти диалога.
-    """
-    user_id = message.from_user.id
-    raw_text = message.text.strip()
+async def handle_text(message: Message, state: FSMContext):
+    raw_text = (message.text or "").strip()
     if not raw_text:
         return
 
-    lowered = raw_text.lower()
+    command = _match_natural_command(raw_text)
 
-    # 1. Быстрые команды на естественном языке
-    if lowered in {"меню", "start", "старт"}:
-        await cmd_start(message)
-        return
-    elif lowered in {"задачи", "дела", "список задач", "список дел", "что сделать", "планы"}:
-        await cmd_tasks(message)
-        return
-    elif lowered in {"почта", "проверь почту", "что на почте", "новые письма", "письма", "входящие письма", "проверить почту"}:
-        from bot.handlers.email_handler import cmd_check_mail
-        await cmd_check_mail(message)
-        return
-    elif lowered in {"статистика", "статы", "расходы", "заправки"}:
+    if command == "start":
+        await cmd_start(message, state)
+    elif command == "tasks":
+        await send_tasks_list(message, message.from_user.id)
+    elif command == "stats":
         await cmd_stats(message)
-        return
-    elif lowered in {"вещи", "гараж", "инвентарь", "где что лежит"}:
+    elif command == "items":
         await cmd_items(message)
-        return
-    elif lowered in {"помощь", "справка", "help", "инструкция"}:
+    elif command in ("history_fuel", "history_service"):
+        await _send_history(message, message.from_user.id, command)
+    elif command == "mail":
+        from bot.handlers.email_handler import cmd_check_mail
+
+        await cmd_check_mail(message)
+    elif command == "help":
         await cmd_help(message)
-        return
-    elif lowered in {"забудь", "сброс", "очисти диалог", "очисти контекст", "сбрось контекст", "начнем заново", "очистить память", "забудь все"}:
-        await cmd_clear_history(message)
-        return
-
-    # 2. Загрузка недавней истории диалога для контекста
-    async with get_session() as session:
-        history = await crud.get_recent_chat_history(session, user_id=user_id, limit=8)
-
-    context_str = None
-    if history:
-        context_str = "\n".join([f"{h['role']}: {h['content'][:250]}" for h in history[-4:]])
-
-    # 3. Интеллектуальный разбор интента через Groq LLM с учетом контекста
-    parsed = await parse_user_intent(raw_text, context=context_str)
-    intent = parsed.get("intent", "unknown")
-    data = parsed.get("data", {})
-
-    # Ветка: Поиск вещи
-    if intent == "item_find":
-        query = data.get("search_query") or raw_text
-        async with get_session() as session:
-            found = await crud.search_item_locations(session, user_id=user_id, query=query)
-        if found:
-            results = []
-            for it in found:
-                date_str = it.updated_at.strftime("%d.%m.%Y")
-                results.append(f"{E_SEARCH} Найдено: <b>{html.quote(it.item_name)}</b> лежит в <code>{html.quote(it.location)}</code> (обновлено {date_str})")
-            await message.answer("\n\n".join(results))
-        else:
-            await message.answer(f"{E_SEARCH} Ничего похожего в гараже не нашел.")
-
-    # Ветка: Список задач
-    elif intent == "task_list":
-        await cmd_tasks(message)
-
-    # Ветка: Заправка, сервис, вещь, задача (карточка подтверждения)
-    elif intent in ["fuel", "service", "item_save", "task_save"]:
-        draft_id = save_draft(user_id=user_id, intent=intent, data=data)
-        await state.set_state(GarageEntryState.waiting_confirmation)
-        await state.update_data(
-            intent=intent,
-            payload=data,
-            transcript=raw_text,
-            draft_id=draft_id,
-            **data
-        )
-        card_text = format_markdown_card(intent=intent, data=data)
-        await message.answer(
-            card_text,
-            reply_markup=get_entry_confirm_keyboard(draft_id=draft_id),
-            parse_mode=ParseMode.HTML
-        )
-
-    # Ветка: Универсальный ассистент и веб-поиск
-    elif intent == "ask_assistant":
-        needs_web = bool(data.get("needs_web_search"))
-        search_query = data.get("search_query")
-        user_query = data.get("user_query") or raw_text
-
-        status_text = f"{E_SEARCH} <i>Ищу актуальную информацию в интернете...</i>" if needs_web else f"{E_THINK} <i>Думаю над ответом...</i>"
-        status_msg = await message.answer(status_text)
-        try:
-            answer = await stream_assistant_response(
-                message=message,
-                user_query=user_query,
-                needs_web=needs_web,
-                search_query=search_query,
-                history=history,
-                status_msg=status_msg
-            )
-
-            # Сохраняем диалог в память
-            async with get_session() as session:
-                await crud.add_chat_message(session, user_id=user_id, role="user", content=user_query)
-                await crud.add_chat_message(session, user_id=user_id, role="assistant", content=answer)
-
-        except Exception as e:
-            logger.error(f"Ошибка ассистента при текстовом запросе: {e}", exc_info=True)
-            try:
-                await status_msg.delete()
-            except Exception:
-                pass
-            await message.answer(f"{E_ALERT} Не удалось получить ответ. Попробуй переформулировать вопрос.")
-
-    # Ветка: Общий диалог / неопределенный текст
+    elif command == "clear":
+        await cmd_clear(message)
     else:
-        status_msg = await message.answer(f"{E_THINK} <i>Секунду...</i>")
-        try:
-            answer = await stream_assistant_response(
-                message=message,
-                user_query=raw_text,
-                needs_web=False,
-                history=history,
-                status_msg=status_msg
-            )
+        await process_input(message, message.bot, state, raw_text, is_voice=False)
 
-            # Сохраняем диалог в память
-            async with get_session() as session:
-                await crud.add_chat_message(session, user_id=user_id, role="user", content=raw_text)
-                await crud.add_chat_message(session, user_id=user_id, role="assistant", content=answer)
 
-        except Exception:
-            try:
-                await status_msg.delete()
-            except Exception:
-                pass
-            await message.answer(f"{E_QUESTION} Я не совсем понял, что требуется сделать. Напиши вопрос подробнее или нажми /help.")
+async def _send_history(message: Message, user_id: int, which: str) -> None:
+    """Показывает историю заправок или сервиса."""
+    from bot.services.formatters import format_fuel_history, format_service_history
+
+    async with get_session() as session:
+        if which == "history_fuel":
+            logs = await crud.get_recent_fuel_logs(session, user_id=user_id, limit=10)
+            text = format_fuel_history(logs)
+        else:
+            logs = await crud.get_recent_service_logs(session, user_id=user_id, limit=10)
+            text = format_service_history(logs)
+
+    await message.answer(text, reply_markup=get_main_menu_keyboard(), parse_mode=ParseMode.HTML)
+
+
+# --- Неизвестная команда ---
+
+@router.message(F.text.startswith("/"))
+async def handle_unknown_command(message: Message):
+    """Не молчим на опечатки, а подсказываем похожие команды."""
+    raw = (message.text or "").split()[0].lstrip("/").split("@")[0].lower()
+    suggestions = []
+
+    known = [
+        "start", "help", "tasks", "todo", "stats", "statistics",
+        "items", "garage", "agent", "research", "clear", "reset", "mail",
+    ]
+    close = [k for k in known if k.startswith(raw) or raw in k]
+    if close:
+        suggestions = close[:3]
+    else:
+        suggestions = ["start", "help", "tasks"]
+
+    hint = ", ".join(f"<code>/{s}</code>" for s in suggestions)
+    await message.answer(
+        f"{E_QUESTION} Не знаю команды <code>/{html.quote(raw)}</code>.\n\n"
+        f"Возможно, имелось в виду: {hint}\n"
+        f"Полный список — <code>/help</code>",
+        reply_markup=get_main_menu_keyboard(),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+# --- Всё остальное: стикеры, видео, контакты и прочее ---
+
+@router.message()
+async def handle_anything_else(message: Message):
+    """Ловим всё, что бот не умеет, чтобы пользователь не думал, что он завис."""
+    chat_action = message.content_type or "этот тип"
+
+    await message.answer(
+        f"{E_QUESTION} Пока не понимаю, что с этим делать (<code>{html.quote(chat_action)}</code>).\n\n"
+        f"{E_MIC} Лучше всего работает <b>голос или текст</b>:\n"
+        f"• <i>«Заправил 40 литров на 2400»</i>\n"
+        f"• <i>«Запиши купить масло»</i>\n"
+        f"• <i>«Реши уравнение x² = 16»</i>\n\n"
+        f"Файлы PDF / Word / Excel и фотографии тоже понимаю — просто пришли их.\n"
+        f"Команды: <code>/help</code>",
+        parse_mode=ParseMode.HTML,
+    )

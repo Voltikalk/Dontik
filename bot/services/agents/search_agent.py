@@ -1,8 +1,6 @@
 import logging
-from typing import Optional, Dict, Any, List
-from openai import AsyncOpenAI
+from typing import Optional, Dict, Any
 
-from bot.config import settings
 from bot.services.web_search import search_web
 from .base_agent import BaseAgent, AgentResult
 

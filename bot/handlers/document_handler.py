@@ -1,135 +1,120 @@
-import io
-import os
-import uuid
 import logging
+import uuid
+from io import BytesIO
 from pathlib import Path
-from aiogram import Router, html, F, Bot
+
+from aiogram import Bot, F, Router, html
 from aiogram.types import Message
 
-from bot.config import settings
-from bot.database.db import get_session
 from bot.database import crud
+from bot.database.db import get_session
+from bot.emojis import E_ALERT, E_DOC, E_PHOTO
+from bot.services.assistant import stream_assistant_response
 from bot.services.file_parser import extract_text_from_file, parse_pdf_smart
-from bot.services.vision import analyze_image
-from bot.services.assistant import answer_query, stream_assistant_response
 from bot.services.formatters import send_formatted_message
-from bot.emojis import (
-    E_DOC,
-    E_PHOTO,
-    E_LOCK,
-    E_ALERT
-)
+from bot.services.vision import analyze_image
 
 logger = logging.getLogger(__name__)
 
-router = Router(name="document_handler_router")
+router = Router(name="document_router")
+
+MAX_FILE_MB = 20
+HISTORY_LIMIT = 6
+TEMP_DIR = Path("temp")
+
+
+async def _drop_status(status_msg: Message) -> None:
+    """Убирает временное сообщение «Читаю...», не падая при ошибке."""
+    try:
+        await status_msg.delete()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _remember(user_id: int, note: str, answer: str) -> None:
+    """Сохраняет факт работы с файлом в память диалога."""
+    try:
+        async with get_session() as session:
+            await crud.add_chat_message(session, user_id=user_id, role="user", content=note)
+            await crud.add_chat_message(session, user_id=user_id, role="assistant", content=answer[:4000])
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Не сохранил историю по файлу: %s", exc)
 
 
 @router.message(F.document)
-async def handle_document_message(message: Message, bot: Bot):
-    """
-    Обработчик прикрепленных файлов и документов (PDF, Word, Excel, CSV, TXT и др.).
-    """
+async def handle_document(message: Message, bot: Bot):
+    """Разбирает PDF, Word, Excel, CSV, TXT и картинки-файлы."""
     user_id = message.from_user.id
-
-    if settings.ALLOWED_TELEGRAM_IDS and user_id not in settings.ALLOWED_TELEGRAM_IDS:
-        await message.answer(f"{E_LOCK} <b>Доступ ограничен.</b> Ваш ID отсутствует в списке доверенных.")
-        return
-
     doc = message.document
     filename = doc.file_name or "документ"
-    file_size_mb = (doc.file_size or 0) / (1024 * 1024)
 
-    if file_size_mb > 20:
-        await message.answer(f"{E_ALERT} Размер файла превышает 20 МБ. Telegram Bot API не позволяет скачивать файлы такого размера.")
+    if (doc.file_size or 0) / (1024 * 1024) > MAX_FILE_MB:
+        await message.answer(
+            f"{E_ALERT} Файл больше {MAX_FILE_MB} МБ — Telegram такие не отдаёт боту. "
+            f"Пришли сжатый PDF или фото нужной страницы."
+        )
         return
 
-    status_msg = await message.answer(f"{E_DOC} <i>Читаю и анализирую «{html.quote(filename)}»...</i>")
+    status_msg = await message.answer(f"{E_DOC} <i>Читаю «{html.quote(filename)}»...</i>")
 
-    temp_dir = Path("temp")
-    temp_dir.mkdir(parents=True, exist_ok=True)
-    temp_file = temp_dir / f"doc_{uuid.uuid4().hex[:8]}_{filename}"
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    # Имя файла берём из file_id, а не из file_name: пользователь может прислать
+    # путь с '../' или невалидными символами.
+    safe_suffix = Path(filename).suffix[:12]
+    temp_file = TEMP_DIR / f"doc_{uuid.uuid4().hex[:10]}{safe_suffix}"
 
     try:
         await bot.download(doc.file_id, destination=str(temp_file))
-
         mime = (doc.mime_type or "").lower()
         ext = Path(filename).suffix.lower()
 
-        # 1. Если документ на самом деле является изображением
-        if mime.startswith("image/") or ext in [".jpg", ".jpeg", ".png", ".webp", ".bmp"]:
-            image_bytes = temp_file.read_bytes()
-            async with get_session() as session:
-                history = await crud.get_recent_chat_history(session, user_id=user_id, limit=8)
+        caption = (message.caption or "").strip()
 
-            caption = (message.caption or "").strip()
-            answer = await analyze_image(image_bytes=image_bytes, caption=caption, history=history)
-
-            try:
-                await status_msg.delete()
-            except Exception:
-                pass
-
+        # 1. Изображение, присланное как документ
+        if mime.startswith("image/") or ext in {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".heic"}:
+            answer = await analyze_image(
+                image_bytes=temp_file.read_bytes(),
+                caption=caption or "Что изображено на фото? Опиши и ответь на вопрос.",
+            )
+            await _drop_status(status_msg)
             await send_formatted_message(message, answer)
-
-            user_log = f"Отправил изображение «{filename}». " + (f"Подпись: «{caption}»" if caption else "Просьба проанализировать.")
-            async with get_session() as session:
-                await crud.add_chat_message(session, user_id=user_id, role="user", content=user_log)
-                await crud.add_chat_message(session, user_id=user_id, role="assistant", content=answer)
+            await _remember(user_id, f"Прислал изображение «{filename}».", answer)
             return
 
-        # 2. Если документ PDF: проверяем через умный парсер (текст или скан/сертификат)
+        # 2. PDF: сначала пробуем извлечь текст, при неудаче — рендер в картинку и Vision
         if ext == ".pdf":
-            kind, text_content, pdf_image_bytes = parse_pdf_smart(str(temp_file))
-            if kind == "image" and pdf_image_bytes:
-                async with get_session() as session:
-                    history = await crud.get_recent_chat_history(session, user_id=user_id, limit=8)
-
-                caption = (message.caption or "").strip()
-                pdf_caption = caption if caption else (
-                    f"Это визуальный PDF документ или сертификат «{filename}». "
-                    "Внимательно изучи его, распознай весь видимый текст, имена, названия, сертификаты, даты, печати или таблицы "
-                    "и подготовь подробный структурированный ответ на русском языке."
+            kind, text_content, pdf_image = parse_pdf_smart(str(temp_file))
+            if kind == "image" and pdf_image:
+                default_prompt = (
+                    f"Это скан или визуальный документ «{filename}». "
+                    f"Внимательно распознай весь видимый текст, таблицы, суммы, даты и печати, "
+                    f"затем дай структурированный разбор на русском."
                 )
-                answer = await analyze_image(image_bytes=pdf_image_bytes, caption=pdf_caption, history=history)
-
-                try:
-                    await status_msg.delete()
-                except Exception:
-                    pass
-
+                answer = await analyze_image(image_bytes=pdf_image, caption=caption or default_prompt)
+                await _drop_status(status_msg)
                 await send_formatted_message(message, answer)
-
-                user_log = f"Отправил визуальный PDF документ «{filename}». " + (f"Подпись: «{caption}»" if caption else "Просьба разобрать содержимое.")
-                async with get_session() as session:
-                    await crud.add_chat_message(session, user_id=user_id, role="user", content=user_log)
-                    await crud.add_chat_message(session, user_id=user_id, role="assistant", content=answer)
+                await _remember(user_id, f"Прислал визуальный PDF «{filename}».", answer)
                 return
-            else:
-                extracted_text = text_content or ""
+            extracted_text = text_content or ""
         else:
-            # 3. Извлечение текста из других документов (Word, Excel, CSV, TXT)
+            # 3. Word, Excel, CSV, TXT и прочее
             extracted_text = extract_text_from_file(str(temp_file), filename)
 
-        if not extracted_text or extracted_text.startswith("Не удалось") or extracted_text.startswith("Формат файла"):
-            try:
-                await status_msg.delete()
-            except Exception:
-                pass
-            await message.answer(extracted_text)
+        if not extracted_text or extracted_text.startswith(("Не удалось", "Формат файла")):
+            await _drop_status(status_msg)
+            await message.answer(extracted_text or f"{E_ALERT} Не удалось извлечь текст из файла.")
             return
 
         async with get_session() as session:
-            history = await crud.get_recent_chat_history(session, user_id=user_id, limit=3)
+            history = await crud.get_recent_chat_history(session, user_id=user_id, limit=HISTORY_LIMIT)
 
-        caption = (message.caption or "").strip()
         if caption:
-            query = f"{caption}\n\n[Прикрепленный документ: «{filename}»]\n{extracted_text}"
+            query = f"Вопрос пользователя по документу «{filename}»: {caption}\n\nСодержимое:\n{extracted_text}"
         else:
             query = (
-                f"Пользователь прислал документ «{filename}».\n"
-                f"Внимательно изучи его содержимое, подготовь структурированное резюме, "
-                f"выдели ключевые пункты, данные таблиц, выводы или важные показатели:\n\n{extracted_text}"
+                f"Пользователь прислал документ «{filename}» без вопроса. "
+                f"Изучи содержимое и дай полезную структурированную сводку: ключевые данные, "
+                f"таблицы, суммы, выводы.\n\nСодержимое:\n{extracted_text}"
             )
 
         answer = await stream_assistant_response(
@@ -137,71 +122,49 @@ async def handle_document_message(message: Message, bot: Bot):
             user_query=query,
             needs_web=False,
             history=history,
-            status_msg=status_msg
+            status_msg=status_msg,
         )
+        await _remember(user_id, f"Прислал документ «{filename}»{' с вопросом: ' + caption if caption else ''}.", answer)
 
-        user_log = f"Отправил документ «{filename}». " + (f"Запрос: «{caption}»" if caption else "Просьба разобрать содержимое.")
-        async with get_session() as session:
-            await crud.add_chat_message(session, user_id=user_id, role="user", content=user_log)
-            await crud.add_chat_message(session, user_id=user_id, role="assistant", content=answer)
-
-    except Exception as e:
-        logger.error(f"Ошибка при обработке документа {filename}: {e}", exc_info=True)
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-        await message.answer(f"{E_ALERT} Не удалось обработать файл «{html.quote(filename)}»: {html.quote(str(e))}")
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Ошибка обработки документа %s: %s", filename, exc, exc_info=True)
+        await _drop_status(status_msg)
+        await message.answer(
+            f"{E_ALERT} Не удалось обработать «{html.quote(filename)}». "
+            f"Попробуй другой файл или пришли фото нужной страницы."
+        )
     finally:
-        if temp_file.exists():
-            try:
-                temp_file.unlink()
-            except Exception:
-                pass
+        try:
+            temp_file.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 @router.message(F.photo)
-async def handle_photo_message(message: Message, bot: Bot):
-    """
-    Обработчик входящих фотографий (автозапчасти, чеки, приборы, схемы, документы).
-    """
+async def handle_photo(message: Message, bot: Bot):
+    """Анализирует фотографию: детали, чеки, приборы, схемы."""
     user_id = message.from_user.id
-
-    if settings.ALLOWED_TELEGRAM_IDS and user_id not in settings.ALLOWED_TELEGRAM_IDS:
-        await message.answer(f"{E_LOCK} <b>Доступ ограничен.</b> Ваш ID отсутствует в списке доверенных.")
-        return
-
-    # Берем фото в наилучшем доступном разрешении (последний элемент в массиве)
-    photo = message.photo[-1]
+    photo = message.photo[-1]  # последний элемент — максимальное разрешение
     status_msg = await message.answer(f"{E_PHOTO} <i>Анализирую изображение...</i>")
 
     try:
-        buf = io.BytesIO()
+        buf = BytesIO()
         await bot.download(photo.file_id, destination=buf)
-        image_bytes = buf.getvalue()
-
-        async with get_session() as session:
-            history = await crud.get_recent_chat_history(session, user_id=user_id, limit=8)
-
         caption = (message.caption or "").strip()
-        answer = await analyze_image(image_bytes=image_bytes, caption=caption, history=history)
 
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-
+        answer = await analyze_image(
+            image_bytes=buf.getvalue(),
+            caption=caption or "Что на фото? Распознай текст, детали, маркировку и ответь по существу.",
+        )
+        await _drop_status(status_msg)
         await send_formatted_message(message, answer)
+        await _remember(
+            user_id,
+            f"Прислал фотографию{' с подписью: ' + caption if caption else ''}.",
+            answer,
+        )
 
-        user_log = "Отправил фотографию. " + (f"Подпись: «{caption}»" if caption else "Просьба распознать.")
-        async with get_session() as session:
-            await crud.add_chat_message(session, user_id=user_id, role="user", content=user_log)
-            await crud.add_chat_message(session, user_id=user_id, role="assistant", content=answer)
-
-    except Exception as e:
-        logger.error(f"Ошибка при обработке фото: {e}", exc_info=True)
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-        await message.answer(f"{E_ALERT} Не удалось распознать фотографию: {html.quote(str(e))}")
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Ошибка обработки фото: %s", exc, exc_info=True)
+        await _drop_status(status_msg)
+        await message.answer(f"{E_ALERT} Не удалось распознать фото. Попробуй ещё раз или опиши вопрос текстом.")

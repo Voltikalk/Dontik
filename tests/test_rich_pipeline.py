@@ -5,7 +5,7 @@ from aiogram.types import Message, InputRichMessage
 from aiogram.exceptions import TelegramBadRequest
 
 from bot.services.rich_message.converter import markdown_to_rich_html
-from bot.services.rich_message.sender import send_rich_response, replace_math_tags_with_unicode
+from bot.services.rich_message.sender import send_rich_response
 
 
 SAMPLE_INTEGRALS_RESPONSE = """# Топ-5 красивых и важных интегралов

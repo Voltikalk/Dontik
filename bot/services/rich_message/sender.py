@@ -5,9 +5,8 @@ from typing import Optional, List
 from aiogram import Bot
 from aiogram.types import Message, InputRichMessage
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 
-from bot.services.formatters import convert_latex_math, md_to_telegram_html
+from bot.services.formatters import convert_latex_math
 from .converter import markdown_to_rich_html, split_rich_message
 
 logger = logging.getLogger(__name__)
@@ -44,29 +43,29 @@ async def send_rich_response(
     status_msg: Optional[Message] = None,
 ) -> List[Message]:
     """
-    Sends an LLM answer as a native Telegram Rich Message (Bot API 10.1+):
-    - Converts Markdown and LaTeX into Rich HTML with native <tg-math-block> and <tg-math>.
-    - Sends the entire answer in ONE single message (no reply_to_message_id, no split messages).
-    - Cleans up any temporary status_msg.
-    - Robust fallback:
-        1. If sendRichMessage fails due to invalid LaTeX, replaces formulas with Unicode and retries.
-        2. If still failing, falls back to standard sendMessage with ParseMode.HTML.
-        3. If HTML parsing fails, sends plain text.
-    - All Telegram error responses are logged.
+    Отправляет ответ LLM как нативное Rich Message (Bot API 10.1+).
+
+    Конвейер с каскадом откатов, каждый уровень применяется к СВОЕМУ куску:
+      1. sendRichMessage с нативными <tg-math>/<tg-math-block>.
+      2. То же, но формулы заменены на Unicode (если Telegram споткнулся о LaTeX).
+      3. Обычный sendMessage с ParseMode.HTML, сконвертированный ИЗ ЭТОГО ЖЕ куска.
+      4. Тот же кусок как plain text.
+
+    Важно: уровни 3 и 4 конвертируют chunk, а не весь исходный текст, иначе
+    при разбиении на несколько сообщений пользователь получил бы дубли.
     """
     if not raw_markdown.strip():
         return []
 
-    # Clean up temporary "thinking" status message
+    # Убираем временное сообщение «Думаю...»
     if status_msg is not None:
         try:
             await status_msg.delete()
         except Exception:
             pass
 
-    logger.info(f"=== RAW LLM ANSWER (chat_id={chat_id}, length={len(raw_markdown)}) ===\n{raw_markdown}")
+    logger.info("Ответ ассистента (chat_id=%s, символов=%d)", chat_id, len(raw_markdown))
     rich_html = markdown_to_rich_html(raw_markdown)
-    logger.info(f"=== GENERATED RICH HTML (chat_id={chat_id}, length={len(rich_html)}) ===\n{rich_html}")
     chunks = split_rich_message(rich_html, max_limit=32000)
 
     sent_messages: List[Message] = []
@@ -75,68 +74,88 @@ async def send_rich_response(
         is_last = (i == len(chunks) - 1)
         kb = reply_markup if is_last else None
 
-        # Attempt 1: Native send_rich_message with LaTeX tags
+        # Уровень 1: нативное Rich Message с формулами
         try:
-            msg = await bot.send_rich_message(
+            sent_messages.append(await bot.send_rich_message(
                 chat_id=chat_id,
                 rich_message=InputRichMessage(html=chunk),
-                reply_markup=kb
-            )
-            sent_messages.append(msg)
+                reply_markup=kb,
+            ))
             continue
         except Exception as e:
-            logger.warning(
-                f"send_rich_message error from Telegram API: {e}. Starting fallback pipeline...",
-                exc_info=True
-            )
+            logger.warning("send_rich_message не сработал: %s. Пробуем запасные варианты", e)
 
-        # Attempt 2: Fallback replacing <tg-math-block> with Unicode blockquotes
+        # Уровень 2: те же теги, но формулы в Unicode
         try:
             unicode_chunk = replace_math_tags_with_unicode(chunk)
-            msg = await bot.send_rich_message(
+            sent_messages.append(await bot.send_rich_message(
                 chat_id=chat_id,
                 rich_message=InputRichMessage(html=unicode_chunk),
-                reply_markup=kb
-            )
-            sent_messages.append(msg)
+                reply_markup=kb,
+            ))
             continue
-        except Exception as e2:
-            logger.warning(
-                f"send_rich_message with Unicode fallback failed: {e2}. Falling back to standard sendMessage...",
-                exc_info=True
-            )
+        except Exception as e:
+            logger.warning("Rich Message с Unicode-формулами не сработал: %s", e)
 
-        # Attempt 3: Fallback to standard sendMessage with ParseMode.HTML
+        # Уровень 3: обычный HTML. Конвертируем ИМЕННО этот кусок,
+        # вырезая нативные теги формул в текстовый вид.
+        html_chunk = _strip_native_tags_to_html(chunk)
         try:
-            std_html = md_to_telegram_html(raw_markdown)
-            msg = await bot.send_message(
+            sent_messages.append(await bot.send_message(
                 chat_id=chat_id,
-                text=std_html,
+                text=html_chunk,
                 parse_mode=ParseMode.HTML,
-                reply_markup=kb
-            )
-            sent_messages.append(msg)
+                reply_markup=kb,
+            ))
             continue
-        except Exception as e3:
-            logger.warning(
-                f"Standard sendMessage HTML failed: {e3}. Sending plain text...",
-                exc_info=True
-            )
+        except Exception as e:
+            logger.warning("HTML-отправка не сработала: %s", e)
 
-        # Attempt 4: Safe plain text fallback
-        plain_text = re.sub(r'</?[^>]+>', '', chunk)
+        # Уровень 4: гарантированный plain text
+        plain_text = _strip_all_tags(chunk)
         try:
-            msg = await bot.send_message(
+            sent_messages.append(await bot.send_message(
                 chat_id=chat_id,
                 text=plain_text,
                 parse_mode=None,
-                reply_markup=kb
-            )
-            sent_messages.append(msg)
-        except Exception as e4:
-            logger.error(f"Critical failure sending message to chat {chat_id}: {e4}", exc_info=True)
+                reply_markup=kb,
+            ))
+        except Exception as e:
+            logger.error("Не удалось отправить ответ в чат %s: %s", chat_id, e)
 
     return sent_messages
+
+
+def _strip_native_tags_to_html(chunk: str) -> str:
+    """Готовит кусок Rich HTML к отправке через обычный parse_mode=HTML.
+
+    Нативные теги форматирования Telegram (h1-h6, ul/li, tg-math, tg-emoji, pre)
+    в обычном сообщении не поддерживаются, поэтому переводим их в HTML,
+    а формулы — в Unicode через pylatexenc.
+    """
+    text = re.sub(r"<tg-math-block>([\s\S]*?)</tg-math-block>",
+                  lambda m: f"<blockquote><b>{py_html.escape(convert_latex_math(py_html.unescape(m.group(1).strip())), quote=False)}</b></blockquote>",
+                  chunk, flags=re.IGNORECASE)
+    text = re.sub(r"<tg-math>([\s\S]*?)</tg-math>",
+                  lambda m: f"<b>{py_html.escape(convert_latex_math(py_html.unescape(m.group(1).strip())), quote=False)}</b>",
+                  text, flags=re.IGNORECASE)
+    text = re.sub(r"<h([1-6])>([\s\S]*?)</h\1>", r"<b>\2</b>", text)
+    text = re.sub(r"</?(?:ul|ol|li)[^>]*>", lambda m: "\n• " if m.group(0).startswith("<li") else "\n", text)
+    text = re.sub(r"<pre><code[^>]*>([\s\S]*?)</code></pre>",
+                  lambda m: f"<code>{m.group(1)}</code>", text)
+    text = re.sub(r"<tg-emoji[^>]*>([\s\S]*?)</tg-emoji>", r"\1", text, flags=re.IGNORECASE)
+    text = re.sub(r"<table[^>]*>|<t[hd][^>]*>|</t[hd]>|</table>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"</?p>", "", text)
+    return text.strip()
+
+
+def _strip_all_tags(chunk: str) -> str:
+    """Убирает вообще всю разметку, оставляя читаемый текст."""
+    text = re.sub(r"<t[gh][^>]*>.*?</t[gh]>", " ", chunk, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"</?[^>]+>", "", text)
+    text = py_html.unescape(text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 async def send_rich_draft_update(

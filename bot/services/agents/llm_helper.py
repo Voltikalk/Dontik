@@ -1,66 +1,37 @@
-import asyncio
-import logging
-from typing import List, Dict, Optional
-from openai import AsyncOpenAI
+"""Надёжный вызов LLM для субагентов (ретраи и перебор моделей — в bot.services.llm)."""
 
-from bot.config import settings
+import logging
+from typing import Optional
+
+from bot.services.llm import chat_completion
 
 logger = logging.getLogger(__name__)
+
+FALLBACK_TEXT = "Не удалось сформировать вывод субагента из-за временной перегрузки нейросети."
 
 
 async def call_subagent_llm(
     system_prompt: str,
     user_prompt: str,
     temperature: float = 0.3,
-    max_tokens: int = 750,
-    preferred_model: Optional[str] = None
+    max_tokens: int = 900,
+    preferred_model: Optional[str] = None,
 ) -> str:
-    """
-    Надежный вызов LLM для субагентов с защитой от лимитов токенов (1000 OTPM у qwen)
-    и автоматическим переключением на резервные модели.
-    """
-    client = AsyncOpenAI(
-        base_url="https://api.groq.com/openai/v1",
-        api_key=settings.GROQ_API_KEY,
-        max_retries=0
-    )
-
-    # Гарантируем, что max_tokens не превышает лимит вывода на тарифе On-Demand (1000 OTPM)
-    safe_max_tokens = min(max_tokens, 750)
-
-    # Список моделей по приоритету
-    models = []
-    if preferred_model:
-        models.append(preferred_model)
-    for m in ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]:
-        if m not in models:
-            models.append(m)
-
+    """Вызывает LLM от имени субагента и возвращает текст либо осмысленный откат."""
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt}
+        {"role": "user", "content": user_prompt},
     ]
 
-    for model_name in models:
-        try:
-            # Для gpt-oss моделей лимит выше, можно передать больше токенов при необходимости
-            req_tokens = safe_max_tokens if "qwen" in model_name else min(max_tokens, 1200)
+    try:
+        content = await chat_completion(
+            messages,
+            preferred_model=preferred_model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[AgentLLM] Все модели недоступны: %s", exc)
+        return FALLBACK_TEXT
 
-            resp = await client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=req_tokens
-            )
-            content = resp.choices[0].message.content or ""
-            if content.strip():
-                return content.strip()
-        except Exception as e:
-            err_msg = str(e)
-            logger.warning(f"[AgentLLM] Модель {model_name} вернула ошибку: {err_msg[:120]}. Пробуем резервную...")
-            # Если словили 429, делаем короткую паузу перед следующей моделью
-            if "429" in err_msg:
-                await asyncio.sleep(0.5)
-            continue
-
-    return "Не удалось сформировать отчет субагента из-за временной перегрузки серверов нейросети."
+    return content.strip() or FALLBACK_TEXT

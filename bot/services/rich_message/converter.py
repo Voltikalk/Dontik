@@ -1,6 +1,6 @@
 import re
 import html as py_html
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Tuple
 
 try:
     from tg_rich_converter import balance_streaming_markdown
@@ -60,30 +60,48 @@ def clean_squished_bullets(text: str) -> str:
     return "\n".join(out_lines)
 
 
+_MATH_MARKERS = (
+    '\\', '^', '_', '=', '<', '>', '±', '≠', '≤', '≥', '≈', '×', '÷', '·',
+    '∫', '∑', '∏', '√', '∞', '∂', '∇', '⇒', '→', '∈', '∑', '{', '}',
+    '∈', '≡', '⊂', '°', 'π', 'α', 'β', 'γ', 'ω', 'λ', 'μ', 'σ', 'φ', 'Ω',
+)
+
+_MATH_COMMANDS = (
+    'frac', 'sqrt', 'int', 'sum', 'prod', 'lim', 'log', 'ln', 'exp', 'sin',
+    'cos', 'tan', 'left', 'right', 'cdot', 'times', 'leq', 'geq', 'neq',
+    'pmatrix', 'bmatrix', 'cases', 'partial', 'nabla', 'infty', 'begin', 'end',
+)
+
+
 def is_likely_math(content: str) -> bool:
     """
-    Проверяет, является ли строка в $...$ математической формулой,
-    а не ценой вроде '$5' или текстом с символом валюты.
+    Проверяет, является ли содержимое между $...$ математической формулой,
+    а не денежной суммой вроде «$5» или «$10.99».
     """
     s = content.strip()
     if not s or content.startswith(' ') or content.endswith(' '):
         return False
 
-    # Число или денежная сумма ("5", "10.50", "1,000")
+    # Просто число или денежная сумма ("5", "10.50", "1,000")
     if re.match(r'^\d+([.,]\d+)?$', s):
         return False
 
-    # Диапазоны цен ("5 to 10", "5 - 10", "5 and 10")
-    if re.match(r'^\d+([.,]\d+)?\s*(?:to|and|или|и|-|—|до)\s*\$?\d+([.,]\d+)?$', s, re.IGNORECASE):
+    # Диапазон цен ("5 to 10", "5 - 10", "5 and 10")
+    if re.match(r'^\d+([.,]\d+)?\s*(?:to|and|или|и|-|—|до|\.\.)\s*\$?\d+([.,]\d+)?$', s, re.IGNORECASE):
         return False
 
-    # Явные маркеры LaTeX и формул
-    if any(char in s for char in ['\\', '^', '_', '=', '<', '>', '±', '≠', '≤', '≥', '×', '·', '∫', '∑', '√']):
+    # Явные математические символы и фигурные скобки (LaTeX-группировка)
+    if any(char in s for char in _MATH_MARKERS):
         return True
 
-    # Переменные и операторы (+, -, *, /, скобки)
-    if re.match(r'^[a-zA-Z0-9\s\+\-\*/\(\)\,\.]+$', s):
-        if any(op in s for op in ['+', '-', '*', '/', '(', ')']):
+    # Известные LaTeX-команды
+    lowered = s.lower()
+    if any(re.search(rf'\\{cmd}\b', lowered) for cmd in _MATH_COMMANDS):
+        return True
+
+    # Переменные и операторы: a+b, x1/2, 2(x+1)
+    if re.match(r'^[a-zA-Z0-9\s\+\-\*/\(\)\,\.\!]+$', s):
+        if any(op in s for op in ['+', '-', '*', '/', '(', ')', '!']):
             return True
         if len(s) == 1 and s.isalpha():
             return True
